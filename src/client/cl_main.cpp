@@ -1839,6 +1839,7 @@ void CL_CheckForResend( void ) {
 		clc.httpdl[0] = 0;
 		clc.httpdlvalid = qfalse;
 		clc.udpdl = -1;
+		clc.encoding = -1;
 #ifdef MV_MFDOWNLOADS
 		NET_OutOfBandPrint(NS_CLIENT, clc.serverAddress, "jk2mfport");
 #endif
@@ -1848,8 +1849,14 @@ void CL_CheckForResend( void ) {
 		break;
 
 	case CA_CHALLENGING:
-		if (MV_GetCurrentGameversion() == VERSION_UNDEF || ( ( !clc.httpdlvalid || clc.udpdl == -1 ) && com_dedicated->integer) )
+		if (MV_GetCurrentGameversion() == VERSION_UNDEF)
 			break;
+
+		if (!clc.httpdlvalid || clc.udpdl == -1 || clc.encoding == -1)
+			if (!com_sv_running->integer)
+				break;
+			else
+				clc.encoding = 1; // TODO
 
 		// sending back the challenge
 		port = (int) Cvar_VariableValue ("net_qport");
@@ -3221,6 +3228,11 @@ void CL_ServerInfoPacket( netadr_t from, msg_t *msg ) {
 			}
 
 			clc.httpdlvalid = qtrue;
+		}
+
+		if (clc.encoding == -1) {
+			char *val = Info_ValueForKey(infoString, "mvenc");
+			clc.encoding = strtol(val, NULL, 10);
 		}
 
 		return;

@@ -49,7 +49,7 @@ static void CL_Netchan_Encode( msg_t *msg ) {
 		// modify the key with the last received now acknowledged server command
 		if (!string[index])
 			index = 0;
-		if (string[index] > 127 || string[index] == '%') {
+		if (( clc.encoding == 0 && string[index] > 127 ) || string[index] == '%') {
 			key ^= '.' << (i & 1);
 		}
 		else {
@@ -95,7 +95,7 @@ static void CL_Netchan_Decode( msg_t *msg ) {
 		// modify the key with the last sent and with this message acknowledged client command
 		if (!string[index])
 			index = 0;
-		if (string[index] > 127 || string[index] == '%') {
+		if ((clc.encoding == 0 && string[index] > 127) || string[index] == '%') {
 			key ^= '.' << (i & 1);
 		}
 		else {

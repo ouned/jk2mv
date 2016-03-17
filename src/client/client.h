@@ -222,6 +222,7 @@ typedef struct {
 	char httpdl[128];
 	qboolean httpdlvalid;
 	int udpdl;
+	int encoding;
 
 	// demo information
 	char		demoName[MAX_QPATH];

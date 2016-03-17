@@ -600,6 +600,9 @@ void SVC_Info( netadr_t from ) {
 		}
 	}
 
+	// supported string encoding
+	Info_SetValueForKey(infostring, "mvenc", "1"); // TODO
+
 	NET_OutOfBandPrint( NS_SERVER, from, "infoResponse\n%s", infostring );
 }
 
