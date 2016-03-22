@@ -1356,6 +1356,8 @@ void SV_UserinfoChanged( client_t *cl ) {
 		}
 	}
 	
+	cl->encoding = atoi(Info_ValueForKey(cl->userinfo, "mvenc"));
+
 	// TTimo
 	// maintain the IP information
 	// the banning code relies on this being consistently present
