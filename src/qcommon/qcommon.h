@@ -179,10 +179,10 @@ void		NET_Restart_f(void);
 
 void		NET_HTTP_Init();
 void		NET_HTTP_Shutdown();
-void		NET_HTTP_Poll(int msec);
+void		NET_HTTP_ProgressEvents();
 int			NET_HTTP_StartServer(int port);
 void		NET_HTTP_StopServer();
-void		NET_HTTP_StartDownload(const char *url, const char *userAgent, const char *referer);
+void		NET_HTTP_StartDownload(const char *url, const char *toPath, const char *userAgent, const char *referer);
 void		NET_HTTP_StopDownload();
 
 void		NET_SendPacket (netsrc_t sock, int length, const void *data, netadr_t to);
@@ -642,6 +642,7 @@ int		FS_filelength( fileHandle_t f );
 // doesn't work for files that are opened from a pack file
 
 char	*FS_BuildOSPath(const char *base, const char *game, const char *qpath);
+char	*FS_BuildOSPath(const char *base, const char *path);
 
 int		FS_FTell( fileHandle_t f );
 // where are we?

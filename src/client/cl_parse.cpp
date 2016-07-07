@@ -598,33 +598,12 @@ void CL_ParseUDPDownload ( msg_t *msg ) {
 
 /*
 =====================
-CL_ParseHTTPDownload
-
-A HTTP download chunk has been received from the server
-=====================
-*/
-size_t CL_ParseHTTPDownload(const char *ptr, size_t len) {
-	// open the file if not opened yet
-	if (!clc.download) {
-		clc.download = FS_SV_FOpenFileWrite(clc.downloadTempName);
-	}
-
-	return (size_t)FS_Write(ptr, (int)len, clc.download);
-}
-
-/*
-=====================
 CL_EndHTTPDownload
 
 HTTP download ended
 =====================
 */
 void CL_EndHTTPDownload(qboolean abort) {
-	if (clc.download) {
-		FS_FCloseFile(clc.download);
-		clc.download = 0;
-	}
-
 	if (!abort) {
 		FS_SV_Rename(clc.downloadTempName, clc.downloadName);
 	} else {
@@ -661,7 +640,7 @@ CL_DownloadRunning
 =====================
 */
 qboolean CL_DownloadRunning() {
-	return (qboolean)(clc.download > 0);
+	return (qboolean)(strlen(clc.downloadName) > 0);
 }
 
 /*

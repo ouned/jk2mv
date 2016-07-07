@@ -1,61 +1,81 @@
+#include <thread>
+#include <mutex>
+#include <atomic>
 #include <mongoose.h>
 #include "../server/server.h"
 #include "../client/client.h"
 
 #define HTTPSRV_STDPORT 18200
-#define POLLS 20
+#define POLL_MSEC 100
 
-size_t mgstr2str(char *out, size_t outlen, const struct mg_str *in);
+static void NET_HTTP_StartPolling();
+static void NET_HTTP_StopPolling();
+static size_t mgstr2str(char *out, size_t outlen, const struct mg_str *in);
 
+static std::thread worker_thread;
+
+/*
+==============================================
+Shared variables
+==============================================
+*/
+static std::mutex m_event;
+static std::condition_variable cv_event;
+
+static std::atomic<bool> end_poll_loop;
 static struct mg_mgr http_mgr;
 static struct mg_connection *http_srv;
+
+typedef enum {
+	HTTPEVT_NONE,
+	HTTPEVT_FILE_REQUEST,
+	HTTPEVT_DLSTATUS,
+} httpEventType_t;
+
+typedef struct {
+	char reqPath[MAX_OSPATH];
+	char rootPath[MAX_OSPATH];
+	bool allowed;
+} httpFileRequest_t;
+
+typedef struct {
+	size_t bytesWritten;
+	size_t fileSize;
+	bool ended;
+	bool error;
+	char err_msg[256];
+} httpDLStatus_t;
+
+typedef struct {
+	httpEventType_t evtType;
+	bool inuse;
+	std::condition_variable cv_processed;
+	bool processed;
+	void *evt;
+} httpEvent_t;
+
+static httpEvent_t event;
+
 #ifndef DEDICATED
 static struct mg_connection *http_dl;
-static size_t dl_bytesWritten, dl_fileSize;
-static qboolean dl_abortFlag;
+static httpDLStatus_t dlstatus;
+static FILE *dl_file;
+static std::atomic<bool> dl_abortFlag;
+static size_t dl_bytesWritten;
+static size_t dl_fileSize;
 #endif
 
 /*
-====================
-NET_HTTP_Init
-====================
-*/
-void NET_HTTP_Init() {
-	Com_Printf("HTTP Engine initialized\n");
-	mg_mgr_init(&http_mgr, NULL);
-}
-
-/*
-====================
-NET_HTTP_Shutdown
-====================
-*/
-void NET_HTTP_Shutdown() {
-	Com_Printf("HTTP Engine: shutting down...\n");
-	mg_mgr_free(&http_mgr);
-}
-
-/*
-====================
-NET_HTTP_Poll
-====================
-*/
-void NET_HTTP_Poll(int msec) {
-	mg_mgr_poll(&http_mgr, msec);
-
-	for (int i = 0; i < POLLS; i++) {
-		mg_mgr_poll(&http_mgr, 0);
-	}
-}
-
-/*
-====================
-NET_HTTP_RecvData
-====================
+==============================================
+HTTP Worker Thread
+==============================================
 */
 #ifndef DEDICATED
-void NET_HTTP_RecvData(struct mbuf *io, struct mg_connection *nc) {
-	if (dl_abortFlag) {
+char err_msg[256];
+bool internal_error;
+
+static void NET_HTTP_RecvData(struct mbuf *io, struct mg_connection *nc) {
+	if (dl_abortFlag.load()) {
 		nc->flags |= MG_F_CLOSE_IMMEDIATELY;
 		return;
 	}
@@ -65,10 +85,21 @@ void NET_HTTP_RecvData(struct mbuf *io, struct mg_connection *nc) {
 		bytesAvailable = dl_fileSize - dl_bytesWritten;
 	}
 
-	CL_ParseHTTPDownload(io->buf, bytesAvailable);
-	dl_bytesWritten += bytesAvailable;
-	CL_ProgressHTTPDownload(dl_fileSize, dl_bytesWritten);
-	mbuf_remove(io, bytesAvailable);
+	if (bytesAvailable > 0) {
+		fwrite(io->buf, 1, bytesAvailable, dl_file);
+		dl_bytesWritten += bytesAvailable;
+
+		{
+			std::lock_guard<std::mutex> lk(m_event);
+			dlstatus.bytesWritten = dl_bytesWritten;
+			dlstatus.fileSize = dl_fileSize;
+			event.evtType = HTTPEVT_DLSTATUS;
+			event.evt = (httpDLStatus_t *)(&dlstatus);
+			event.inuse = true; event.processed = false;
+		}
+
+		mbuf_remove(io, bytesAvailable);
+	}
 
 	if (dl_bytesWritten == dl_fileSize) {
 		nc->flags |= MG_F_CLOSE_IMMEDIATELY;
@@ -76,23 +107,38 @@ void NET_HTTP_RecvData(struct mbuf *io, struct mg_connection *nc) {
 }
 #endif
 
-/*
-====================
-NET_HTTP_Event
-====================
-*/
 static void NET_HTTP_Event(struct mg_connection *nc, int ev, void *ev_data) {
 	if (http_srv && nc->listener == http_srv) {
 		if (ev == MG_EV_HTTP_REQUEST) {
 			struct http_message *hm = (struct http_message *)ev_data;
 
-			char reqPath[MAX_OSPATH];
-			mgstr2str(reqPath, sizeof(reqPath), &hm->uri);
+			httpFileRequest_t filereq_evt;
+			mgstr2str(filereq_evt.reqPath, sizeof(filereq_evt.reqPath), &hm->uri);
+			memmove(filereq_evt.reqPath, filereq_evt.reqPath + 1, strlen(filereq_evt.reqPath));
 
-			const char *rootPath = FS_MV_VerifyDownloadPath(reqPath + 1);
-			if (rootPath) {
+			// wait for free event, set event, wait for result, free event and notify another worker thread
+			{
+				std::unique_lock<std::mutex> lk(m_event);
+
+				if (event.inuse) {
+					cv_event.wait(lk, [] { return !event.inuse; });
+				}
+
+				event.evtType = HTTPEVT_FILE_REQUEST;
+				event.inuse = true;
+				event.processed = false; event.processed = false;
+				event.evt = (void *)(&filereq_evt);
+
+				event.cv_processed.wait(lk, [] { return event.processed; });
+
+				event.inuse = false;
+				lk.unlock();
+				cv_event.notify_one();
+			}
+
+			if (filereq_evt.allowed) {
 				struct mg_serve_http_opts opts = {
-					rootPath
+					filereq_evt.rootPath
 				};
 
 				mg_serve_http(nc, hm, opts);
@@ -108,7 +154,9 @@ static void NET_HTTP_Event(struct mg_connection *nc, int ev, void *ev_data) {
 		switch (ev) {
 		case MG_EV_CONNECT: {
 			if (*(int *)ev_data != 0) {
-				Com_Error(ERR_DROP, "connecting failed: %s\n", strerror(*(int *)ev_data));
+				sprintf(err_msg, "connecting failed: %s", strerror(*(int *)ev_data));
+				internal_error = true;
+				nc->flags |= MG_F_CLOSE_IMMEDIATELY;
 				return;
 			}
 			break;
@@ -118,11 +166,12 @@ static void NET_HTTP_Event(struct mg_connection *nc, int ev, void *ev_data) {
 			struct http_message msg;
 			if (!dl_fileSize && mg_parse_http(io->buf, (int)io->len, &msg, 0)) {
 				if (msg.resp_code != 200) {
-					char err_msg[128];
+					char tmp[128];
 
-					mgstr2str(err_msg, sizeof(err_msg), &msg.resp_status_msg);
+					mgstr2str(tmp, sizeof(tmp), &msg.resp_status_msg);
+					sprintf(err_msg, "HTTP Error: %i %s", msg.resp_code, tmp);
+					internal_error = true;
 					nc->flags |= MG_F_CLOSE_IMMEDIATELY;
-					Com_Error(ERR_DROP, "%i %s\n", msg.resp_code, err_msg);
 					return;
 				}
 
@@ -137,16 +186,23 @@ static void NET_HTTP_Event(struct mg_connection *nc, int ev, void *ev_data) {
 			}
 			break;
 		} case MG_EV_CLOSE: {
-			if (!dl_fileSize || dl_bytesWritten != dl_fileSize ) {
-				CL_EndHTTPDownload(qtrue);
+			std::lock_guard<std::mutex> lk(m_event);
+			event.evtType = HTTPEVT_DLSTATUS;
+			event.evt = (httpDLStatus_t *)(&dlstatus);
+			event.inuse = true; event.processed = false;
+			dlstatus.ended = true;
 
-				if (!dl_abortFlag)
-					Com_Error(ERR_DROP, "connection closed by remote host\n");
+			if (!dl_fileSize || dl_bytesWritten != dl_fileSize) {
+				if (internal_error) {
+					dlstatus.error = true;
+					Q_strncpyz(dlstatus.err_msg, err_msg, sizeof(dlstatus.err_msg));
+				} else if (!dl_abortFlag.load()) {
+					dlstatus.error = true;
+					Q_strncpyz(dlstatus.err_msg, "HTTP connection closed by remote host", sizeof(dlstatus.err_msg));
+				}
 
 				return;
 			}
-
-			CL_EndHTTPDownload(qfalse);
 			break;
 		} default:
 			break;
@@ -155,14 +211,109 @@ static void NET_HTTP_Event(struct mg_connection *nc, int ev, void *ev_data) {
 #endif
 }
 
-size_t mgstr2str(char *out, size_t outlen, const struct mg_str *in) {
-	size_t cpylen = in->len;
-	if (cpylen > outlen - 1) cpylen = outlen - 1;
+static void NET_HTTP_PollLoop() {
+	for (;;) {
+		mg_mgr_poll(&http_mgr, POLL_MSEC);
 
-	memcpy(out, in->p, cpylen);
-	out[cpylen] = '\0';
+		if (end_poll_loop.load()) {
+			return;
+		}
+	}
+}
 
-	return cpylen;
+/*
+====================
+NET_HTTP_ProgressEvents
+====================
+*/
+void NET_HTTP_ProgressEvents() {
+	std::unique_lock<std::mutex> lk(m_event);
+
+	if (event.inuse && !event.processed) {
+		if (event.evtType == HTTPEVT_FILE_REQUEST) {
+			httpFileRequest_t *filereq = (httpFileRequest_t *)event.evt;
+
+			const char *rootPath = FS_MV_VerifyDownloadPath(filereq->reqPath);
+			if (rootPath) {
+				filereq->allowed = true;
+				Q_strncpyz(filereq->rootPath, rootPath, sizeof(filereq->reqPath));
+			} else {
+				filereq->allowed = false;
+			}
+		}
+#ifndef DEDICATED
+		else if (event.evtType == HTTPEVT_DLSTATUS) {
+			httpDLStatus_t *dlstatus = (httpDLStatus_t *)event.evt;
+
+			if (dlstatus->ended) {
+				NET_HTTP_StopDownload();
+
+				if (dlstatus->error) {
+					Com_Error(ERR_DROP, dlstatus->err_msg);
+				}
+			} else {
+				CL_ProgressHTTPDownload(dlstatus->fileSize, dlstatus->bytesWritten);
+			}
+		}
+#endif
+
+		// notify thread about processed event
+		event.processed = true;
+		lk.unlock();
+		event.cv_processed.notify_one();
+	}
+}
+
+/*
+====================
+NET_HTTP_StartPolling
+====================
+*/
+static void NET_HTTP_StartPolling() {
+	if (worker_thread.joinable())
+		return;
+
+	end_poll_loop = false;
+	worker_thread = std::thread(NET_HTTP_PollLoop);
+}
+
+/*
+====================
+NET_HTTP_StopPolling
+====================
+*/
+static void NET_HTTP_StopPolling() {
+	if (!worker_thread.joinable())
+		return;
+
+	end_poll_loop = true;
+	worker_thread.join();
+}
+
+/*
+====================
+NET_HTTP_Init
+====================
+*/
+void NET_HTTP_Init() {
+	mg_mgr_init(&http_mgr, NULL);
+	Com_Printf("HTTP Engine initialized\n");
+}
+
+/*
+====================
+NET_HTTP_Shutdown
+====================
+*/
+void NET_HTTP_Shutdown() {
+	if (!worker_thread.joinable())
+		return;
+
+	NET_HTTP_StopPolling();
+	NET_HTTP_StopServer();
+
+	Com_Printf("HTTP Engine: shutting down...\n");
+	mg_mgr_free(&http_mgr);
 }
 
 /*
@@ -171,7 +322,10 @@ NET_HTTP_StartServer
 ====================
 */
 int NET_HTTP_StartServer(int port) {
+	NET_HTTP_StopPolling();
+
 	if (http_srv) {
+		NET_HTTP_StartPolling();
 		return 0;
 	}
 
@@ -186,8 +340,9 @@ int NET_HTTP_StartServer(int port) {
 
 	if (http_srv) {
 		mg_set_protocol_http_websocket(http_srv);
-		Com_Printf("HTTP Downloads: webserver running on port %i...\n", port);
+		NET_HTTP_StartPolling();
 
+		Com_Printf("HTTP Downloads: webserver running on port %i...\n", port);
 		return port;
 	} else {
 		Com_Error(ERR_DROP, "HTTP Downloads: webserver startup failed.");
@@ -201,6 +356,8 @@ NET_HTTP_StopServer
 ====================
 */
 void NET_HTTP_StopServer() {
+	NET_HTTP_StopPolling();
+
 	if (!http_srv) {
 		return;
 	}
@@ -218,14 +375,26 @@ void NET_HTTP_StopServer() {
 NET_HTTP_StartDownload
 ====================
 */
-void NET_HTTP_StartDownload(const char *url, const char *userAgent, const char *referer) {
+void NET_HTTP_StartDownload(const char *url, const char *toPath, const char *userAgent, const char *referer) {
+	if (dl_file) {
+		return;
+	}
+
 	dl_bytesWritten = dl_fileSize = 0;
-	dl_abortFlag = qfalse;
+	dl_abortFlag = false; internal_error = false;
+	memset(&dlstatus, 0, sizeof(dlstatus));
+
+	dl_file = fopen(toPath, "wb");
+	if (!dl_file) {
+		Com_Error(ERR_DROP, "could not open file %s for writing.", toPath);
+		return;
+	}
 
 	char headers[1024];
 	Com_sprintf(headers, sizeof(headers), "User-Agent: %s\r\nReferer: %s\r\n", userAgent, referer);
 
 	http_dl = mg_connect_http(&http_mgr, NET_HTTP_Event, url, headers, NULL);
+	NET_HTTP_StartPolling();
 }
 
 /*
@@ -234,6 +403,26 @@ NET_HTTP_StopDownload
 ====================
 */
 void NET_HTTP_StopDownload() {
-	dl_abortFlag = qtrue;
+	if (!dl_file) {
+		return;
+	}
+
+	dl_abortFlag = true;
+	NET_HTTP_StopPolling();
+	http_dl = NULL;
+	event.inuse = false;
+
+	fclose(dl_file); dl_file = NULL;
+	CL_EndHTTPDownload((qboolean)!(dl_fileSize && dl_bytesWritten == dl_fileSize));
 }
 #endif
+
+static size_t mgstr2str(char *out, size_t outlen, const struct mg_str *in) {
+	size_t cpylen = in->len;
+	if (cpylen > outlen - 1) cpylen = outlen - 1;
+
+	memcpy(out, in->p, cpylen);
+	out[cpylen] = '\0';
+
+	return cpylen;
+}
