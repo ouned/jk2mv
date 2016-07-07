@@ -298,7 +298,7 @@ NET_HTTP_Init
 */
 void NET_HTTP_Init() {
 	mg_mgr_init(&http_mgr, NULL);
-	Com_Printf("HTTP Engine initialized\n");
+	Com_DPrintf("HTTP Engine initialized\n");
 }
 
 /*
@@ -313,7 +313,7 @@ void NET_HTTP_Shutdown() {
 	NET_HTTP_StopPolling();
 	NET_HTTP_StopServer();
 
-	Com_Printf("HTTP Engine: shutting down...\n");
+	Com_DPrintf("HTTP Engine: shutting down...\n");
 	mg_mgr_free(&http_mgr);
 }
 
