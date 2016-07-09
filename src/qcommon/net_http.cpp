@@ -21,7 +21,6 @@ Shared variables
 ==============================================
 */
 static std::mutex m_event;
-static std::condition_variable cv_event;
 
 static std::atomic<bool> end_poll_loop;
 static struct mg_mgr http_mgr;
@@ -87,7 +86,21 @@ static void NET_HTTP_RecvData(struct mbuf *io, struct mg_connection *nc) {
 	}
 
 	if (bytesAvailable > 0) {
-		fwrite(io->buf, 1, bytesAvailable, dl_file);
+		size_t wrote = 0;
+		size_t total = 0;
+
+		// Handle short writes
+		while ((wrote = fwrite(io->buf + total, 1, bytesAvailable - total, dl_file)) > 0) {
+			total += wrote;
+		}
+
+		if (total < bytesAvailable) {
+			strcpy(err_msg, "HTTP Error: 0 bytes written to file\n");
+			internal_error = true;
+			nc->flags |= MG_F_CLOSE_IMMEDIATELY;
+			return;
+		}
+
 		dl_bytesWritten += bytesAvailable;
 
 		{
@@ -96,7 +109,8 @@ static void NET_HTTP_RecvData(struct mbuf *io, struct mg_connection *nc) {
 			dlstatus.fileSize = dl_fileSize;
 			event.evtType = HTTPEVT_DLSTATUS;
 			event.evt = (httpDLStatus_t *)(&dlstatus);
-			event.inuse = true; event.processed = false;
+			event.inuse = true;
+			event.processed = false;
 		}
 
 		mbuf_remove(io, bytesAvailable);
@@ -109,6 +123,7 @@ static void NET_HTTP_RecvData(struct mbuf *io, struct mg_connection *nc) {
 #endif
 
 static void NET_HTTP_Event(struct mg_connection *nc, int ev, void *ev_data) {
+	assert(http_srv);
 	if (http_srv && nc->listener == http_srv) {
 		if (ev == MG_EV_HTTP_REQUEST) {
 			struct http_message *hm = (struct http_message *)ev_data;
@@ -121,20 +136,16 @@ static void NET_HTTP_Event(struct mg_connection *nc, int ev, void *ev_data) {
 			{
 				std::unique_lock<std::mutex> lk(m_event);
 
-				if (event.inuse) {
-					cv_event.wait(lk, [] { return !event.inuse; });
-				}
-
 				event.evtType = HTTPEVT_FILE_REQUEST;
 				event.inuse = true;
-				event.processed = false; event.processed = false;
+				event.processed = false;
 				event.evt = (void *)(&filereq_evt);
 
 				event.cv_processed.wait(lk, [] { return event.processed; });
 
+				event.evt = NULL;
 				event.inuse = false;
 				lk.unlock();
-				cv_event.notify_one();
 			}
 
 			if (filereq_evt.allowed) {
@@ -190,7 +201,8 @@ static void NET_HTTP_Event(struct mg_connection *nc, int ev, void *ev_data) {
 			std::lock_guard<std::mutex> lk(m_event);
 			event.evtType = HTTPEVT_DLSTATUS;
 			event.evt = (httpDLStatus_t *)(&dlstatus);
-			event.inuse = true; event.processed = false;
+			event.inuse = true;
+			event.processed = false;
 			dlstatus.ended = true;
 
 			if (!dl_fileSize || dl_bytesWritten != dl_fileSize) {
@@ -209,6 +221,7 @@ static void NET_HTTP_Event(struct mg_connection *nc, int ev, void *ev_data) {
 			break;
 		}
 	}
+	assert(http_dl);
 #endif
 }
 
@@ -307,10 +320,6 @@ NET_HTTP_Shutdown
 ====================
 */
 void NET_HTTP_Shutdown() {
-	if (!worker_thread.joinable())
-		return;
-
-	NET_HTTP_StopPolling();
 	NET_HTTP_StopServer();
 
 	Com_DPrintf("HTTP Engine: shutting down...\n");
@@ -366,7 +375,6 @@ void NET_HTTP_StopServer() {
 	Com_Printf("HTTP Downloads: shutting down webserver...\n");
 
 	mg_mgr_free(&http_mgr);
-	mg_mgr_init(&http_mgr, NULL);
 	http_srv = NULL;
 }
 
