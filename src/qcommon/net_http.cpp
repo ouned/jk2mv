@@ -127,6 +127,7 @@ int NET_HTTP_StartServer(int port) {
 		srv.event.processed = true;
 
 		// start polling thread
+		srv.end_poll_loop = false;
 		srv.thread = std::thread(NET_HTTP_ServerPollLoop);
 
 		Com_Printf("HTTP Downloads: webserver running on port %i...\n", port);
@@ -152,7 +153,6 @@ void NET_HTTP_StopServer() {
 
 	srv.end_poll_loop = true;
 	srv.thread.join();
-	srv.end_poll_loop = false;
 
 	mg_mgr_free(&srv.mgr);
 	srv.running = false;
@@ -166,7 +166,7 @@ Clientside Downloads
 */
 #define MAX_PARALLEL_DOWNLOADS 8
 
-static std::mutex m_dls;
+static std::mutex m_cldls;
 static struct clientDL_t {
 	struct mg_mgr mgr;
 	struct mg_connection *con;
@@ -187,7 +187,7 @@ static struct clientDL_t {
 } cldls[MAX_PARALLEL_DOWNLOADS];
 
 static void NET_HTTP_DownloadProcessEvent() {
-	std::lock_guard<std::mutex> lk(m_dls);
+	std::lock_guard<std::mutex> lk(m_cldls);
 
 	for (int i = 0; i < ARRAY_LEN(cldls); i++) {
 		clientDL_t *cldl = &cldls[i];
@@ -245,13 +245,13 @@ static void NET_HTTP_DownloadRecvData(struct mbuf *io, struct mg_connection *nc,
 }
 
 static void NET_HTTP_DownloadEvent(struct mg_connection *nc, int ev, void *ev_data) {
-	std::unique_lock<std::mutex> lk(m_dls);
+	std::unique_lock<std::mutex> lk(m_cldls);
 	clientDL_t *cldl = (clientDL_t *)nc->user_data;
 
 	switch (ev) {
 	case MG_EV_CONNECT: {
 		if (*(int *)ev_data != 0) {
-			sprintf(cldl->err_msg, "connecting failed: %s", strerror(*(int *)ev_data));
+			Com_sprintf(cldl->err_msg, sizeof(cldl->err_msg), "connecting failed: %s", strerror(*(int *)ev_data));
 			cldl->error = true;
 			nc->flags |= MG_F_CLOSE_IMMEDIATELY;
 			return;
@@ -266,7 +266,7 @@ static void NET_HTTP_DownloadEvent(struct mg_connection *nc, int ev, void *ev_da
 				char tmp[128];
 
 				mgstr2str(tmp, sizeof(tmp), &msg.resp_status_msg);
-				sprintf(cldl->err_msg, "HTTP Error: %i %s", msg.resp_code, tmp);
+				Com_sprintf(cldl->err_msg, sizeof(cldl->err_msg), "HTTP Error: %i %s", msg.resp_code, tmp);
 				cldl->error = true;
 				nc->flags |= MG_F_CLOSE_IMMEDIATELY;
 				return;
@@ -306,7 +306,7 @@ NET_HTTP_StartDownload
 ====================
 */
 dlHandle_t NET_HTTP_StartDownload(const char *url, const char *toPath, dl_ended_callback ended_callback, dl_status_callback status_callback, const char *userAgent, const char *referer) {
-	std::lock_guard<std::mutex> lk(m_dls);
+	std::lock_guard<std::mutex> lk(m_cldls);
 
 	// search for free dl slot
 	clientDL_t *cldl = NULL;
