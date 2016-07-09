@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <thread>
 #include <mutex>
 #include <atomic>
@@ -251,7 +252,7 @@ static void NET_HTTP_DownloadEvent(struct mg_connection *nc, int ev, void *ev_da
 	switch (ev) {
 	case MG_EV_CONNECT: {
 		if (*(int *)ev_data != 0) {
-			Com_sprintf(cldl->err_msg, sizeof(cldl->err_msg), "connecting failed: %s", strerror(*(int *)ev_data));
+			snprintf(cldl->err_msg, sizeof(cldl->err_msg), "connecting failed: %s", strerror(*(int *)ev_data));
 			cldl->error = true;
 			nc->flags |= MG_F_CLOSE_IMMEDIATELY;
 			return;
@@ -266,7 +267,7 @@ static void NET_HTTP_DownloadEvent(struct mg_connection *nc, int ev, void *ev_da
 				char tmp[128];
 
 				mgstr2str(tmp, sizeof(tmp), &msg.resp_status_msg);
-				Com_sprintf(cldl->err_msg, sizeof(cldl->err_msg), "HTTP Error: %i %s", msg.resp_code, tmp);
+				snprintf(cldl->err_msg, sizeof(cldl->err_msg), "HTTP Error: %i %s", msg.resp_code, tmp);
 				cldl->error = true;
 				nc->flags |= MG_F_CLOSE_IMMEDIATELY;
 				return;
