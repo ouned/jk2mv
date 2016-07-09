@@ -133,6 +133,7 @@ int NET_HTTP_StartServer(int port) {
 		srv.running = true;
 		return port;
 	} else {
+		mg_mgr_free(&srv.mgr);
 		Com_Error(ERR_DROP, "HTTP Downloads: webserver startup failed.");
 		return 0;
 	}
@@ -371,6 +372,8 @@ void NET_HTTP_StopDownload(dlHandle_t handle) {
 
 	fclose(cldl->file);
 	cldl->file = NULL;
+
+	mg_mgr_free(&cldl->mgr);
 }
 
 #endif
