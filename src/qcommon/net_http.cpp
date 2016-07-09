@@ -6,324 +6,98 @@
 #include "../server/server.h"
 #include "../client/client.h"
 
-#define HTTPSRV_STDPORT 18200
 #define POLL_MSEC 100
 
-static void NET_HTTP_StartPolling();
-static void NET_HTTP_StopPolling();
-static size_t mgstr2str(char *out, size_t outlen, const struct mg_str *in);
+static size_t mgstr2str(char *out, size_t outlen, const struct mg_str *in) {
+	size_t cpylen = in->len;
+	if (cpylen > outlen - 1) cpylen = outlen - 1;
 
-static std::thread worker_thread;
+	memcpy(out, in->p, cpylen);
+	out[cpylen] = '\0';
 
-/*
-==============================================
-Shared variables
-==============================================
-*/
-static std::mutex m_event;
-
-static std::atomic<bool> end_poll_loop;
-static struct mg_mgr http_mgr;
-static struct mg_connection *http_srv;
-
-typedef enum {
-	HTTPEVT_NONE,
-	HTTPEVT_FILE_REQUEST,
-	HTTPEVT_DLSTATUS,
-} httpEventType_t;
-
-typedef struct {
-	char reqPath[MAX_OSPATH];
-	char rootPath[MAX_OSPATH];
-	bool allowed;
-} httpFileRequest_t;
-
-typedef struct {
-	size_t bytesWritten;
-	size_t fileSize;
-	bool ended;
-	bool error;
-	char err_msg[256];
-} httpDLStatus_t;
-
-typedef struct {
-	httpEventType_t evtType;
-	bool inuse;
-	std::condition_variable cv_processed;
-	bool processed;
-	void *evt;
-} httpEvent_t;
-
-static httpEvent_t event;
-
-#ifndef DEDICATED
-static struct mg_connection *http_dl;
-static httpDLStatus_t dlstatus;
-static FILE *dl_file;
-static std::atomic<bool> dl_abortFlag;
-static size_t dl_bytesWritten;
-static size_t dl_fileSize;
-#endif
-
-/*
-==============================================
-HTTP Worker Thread
-==============================================
-*/
-#ifndef DEDICATED
-char err_msg[256];
-bool internal_error;
-
-static void NET_HTTP_RecvData(struct mbuf *io, struct mg_connection *nc) {
-	if (dl_abortFlag.load()) {
-		nc->flags |= MG_F_CLOSE_IMMEDIATELY;
-		return;
-	}
-
-	size_t bytesAvailable = io->len;
-	if (dl_bytesWritten + bytesAvailable > dl_fileSize) {
-		bytesAvailable = dl_fileSize - dl_bytesWritten;
-	}
-
-	if (bytesAvailable > 0) {
-		size_t wrote = 0;
-		size_t total = 0;
-
-		// Handle short writes
-		while ((wrote = fwrite(io->buf + total, 1, bytesAvailable - total, dl_file)) > 0) {
-			total += wrote;
-		}
-
-		if (total < bytesAvailable) {
-			strcpy(err_msg, "HTTP Error: 0 bytes written to file\n");
-			internal_error = true;
-			nc->flags |= MG_F_CLOSE_IMMEDIATELY;
-			return;
-		}
-
-		dl_bytesWritten += bytesAvailable;
-
-		{
-			std::lock_guard<std::mutex> lk(m_event);
-			dlstatus.bytesWritten = dl_bytesWritten;
-			dlstatus.fileSize = dl_fileSize;
-			event.evtType = HTTPEVT_DLSTATUS;
-			event.evt = (httpDLStatus_t *)(&dlstatus);
-			event.inuse = true;
-			event.processed = false;
-		}
-
-		mbuf_remove(io, bytesAvailable);
-	}
-
-	if (dl_bytesWritten == dl_fileSize) {
-		nc->flags |= MG_F_CLOSE_IMMEDIATELY;
-	}
-}
-#endif
-
-static void NET_HTTP_Event(struct mg_connection *nc, int ev, void *ev_data) {
-	assert(http_srv);
-	if (http_srv && nc->listener == http_srv) {
-		if (ev == MG_EV_HTTP_REQUEST) {
-			struct http_message *hm = (struct http_message *)ev_data;
-
-			httpFileRequest_t filereq_evt;
-			mgstr2str(filereq_evt.reqPath, sizeof(filereq_evt.reqPath), &hm->uri);
-			memmove(filereq_evt.reqPath, filereq_evt.reqPath + 1, strlen(filereq_evt.reqPath));
-
-			// wait for free event, set event, wait for result, free event and notify another worker thread
-			{
-				std::unique_lock<std::mutex> lk(m_event);
-
-				event.evtType = HTTPEVT_FILE_REQUEST;
-				event.inuse = true;
-				event.processed = false;
-				event.evt = (void *)(&filereq_evt);
-
-				event.cv_processed.wait(lk, [] { return event.processed; });
-
-				event.evt = NULL;
-				event.inuse = false;
-				lk.unlock();
-			}
-
-			if (filereq_evt.allowed) {
-				struct mg_serve_http_opts opts = {
-					filereq_evt.rootPath
-				};
-
-				mg_serve_http(nc, hm, opts);
-			} else {
-				mg_printf(nc, "HTTP/1.1 403 Forbidden\r\nContent-Type: text/html\r\n\r\n"
-					"<html><body><h1>403 Forbidden</h1></body></html>");
-				nc->flags |= MG_F_SEND_AND_CLOSE;
-			}
-		}
-	}
-#ifndef DEDICATED
-	else if (http_dl && nc == http_dl) {
-		switch (ev) {
-		case MG_EV_CONNECT: {
-			if (*(int *)ev_data != 0) {
-				sprintf(err_msg, "connecting failed: %s", strerror(*(int *)ev_data));
-				internal_error = true;
-				nc->flags |= MG_F_CLOSE_IMMEDIATELY;
-				return;
-			}
-			break;
-		} case MG_EV_RECV: {
-			struct mbuf *io = &nc->recv_mbuf;
-
-			struct http_message msg;
-			if (!dl_fileSize && mg_parse_http(io->buf, (int)io->len, &msg, 0)) {
-				if (msg.resp_code != 200) {
-					char tmp[128];
-
-					mgstr2str(tmp, sizeof(tmp), &msg.resp_status_msg);
-					sprintf(err_msg, "HTTP Error: %i %s", msg.resp_code, tmp);
-					internal_error = true;
-					nc->flags |= MG_F_CLOSE_IMMEDIATELY;
-					return;
-				}
-
-				if (msg.body.len && io->buf + io->len >= msg.body.p) {
-					dl_fileSize = msg.body.len;
-
-					mbuf_remove(io, msg.body.p - io->buf);
-					NET_HTTP_RecvData(io, nc);
-				}
-			} else {
-				NET_HTTP_RecvData(io, nc);
-			}
-			break;
-		} case MG_EV_CLOSE: {
-			std::lock_guard<std::mutex> lk(m_event);
-			event.evtType = HTTPEVT_DLSTATUS;
-			event.evt = (httpDLStatus_t *)(&dlstatus);
-			event.inuse = true;
-			event.processed = false;
-			dlstatus.ended = true;
-
-			if (!dl_fileSize || dl_bytesWritten != dl_fileSize) {
-				if (internal_error) {
-					dlstatus.error = true;
-					Q_strncpyz(dlstatus.err_msg, err_msg, sizeof(dlstatus.err_msg));
-				} else if (!dl_abortFlag.load()) {
-					dlstatus.error = true;
-					Q_strncpyz(dlstatus.err_msg, "HTTP connection closed by remote host", sizeof(dlstatus.err_msg));
-				}
-
-				return;
-			}
-			break;
-		} default:
-			break;
-		}
-	}
-	assert(http_dl);
-#endif
-}
-
-static void NET_HTTP_PollLoop() {
-	for (;;) {
-		mg_mgr_poll(&http_mgr, POLL_MSEC);
-
-		if (end_poll_loop.load()) {
-			return;
-		}
-	}
+	return cpylen;
 }
 
 /*
-====================
-NET_HTTP_ProgressEvents
-====================
+========================================================
+Webserver
+========================================================
 */
-void NET_HTTP_ProgressEvents() {
-	std::unique_lock<std::mutex> lk(m_event);
+#define HTTPSRV_STDPORT 18200
 
-	if (event.inuse && !event.processed) {
-		if (event.evtType == HTTPEVT_FILE_REQUEST) {
-			httpFileRequest_t *filereq = (httpFileRequest_t *)event.evt;
+static struct {
+	std::thread thread;
+	std::atomic_bool end_poll_loop;
 
-			const char *rootPath = FS_MV_VerifyDownloadPath(filereq->reqPath);
-			if (rootPath) {
-				filereq->allowed = true;
-				Q_strncpyz(filereq->rootPath, rootPath, sizeof(filereq->reqPath));
-			} else {
-				filereq->allowed = false;
-			}
+	struct mg_mgr mgr;
+	struct mg_connection *con;
+	bool running;
+
+	struct {
+		std::mutex mutex;
+		std::condition_variable cv_processed;
+		bool processed;
+
+		char reqPath[MAX_OSPATH];
+		char rootPath[MAX_OSPATH];
+		bool allowed;
+	} event;
+} srv;
+
+static void NET_HTTP_ServerProcessEvent() {
+	std::unique_lock<std::mutex> lk(srv.event.mutex);
+
+	if (!srv.event.processed) {
+		const char *rootPath = FS_MV_VerifyDownloadPath(srv.event.reqPath);
+		if (rootPath) {
+			srv.event.allowed = true;
+			Q_strncpyz(srv.event.rootPath, rootPath, sizeof(srv.event.rootPath));
+		} else {
+			srv.event.allowed = false;
 		}
-#ifndef DEDICATED
-		else if (event.evtType == HTTPEVT_DLSTATUS) {
-			httpDLStatus_t *dlstatus = (httpDLStatus_t *)event.evt;
-
-			if (dlstatus->ended) {
-				NET_HTTP_StopDownload();
-
-				if (dlstatus->error) {
-					Com_Error(ERR_DROP, dlstatus->err_msg);
-				}
-			} else {
-				CL_ProgressHTTPDownload(dlstatus->fileSize, dlstatus->bytesWritten);
-			}
-		}
-#endif
 
 		// notify thread about processed event
-		event.processed = true;
+		srv.event.processed = true;
 		lk.unlock();
-		event.cv_processed.notify_one();
+		srv.event.cv_processed.notify_one();
 	}
 }
 
-/*
-====================
-NET_HTTP_StartPolling
-====================
-*/
-static void NET_HTTP_StartPolling() {
-	if (worker_thread.joinable())
-		return;
+static void NET_HTTP_ServerEvent(struct mg_connection *nc, int ev, void *ev_data) {
+	if (ev == MG_EV_HTTP_REQUEST) {
+		struct http_message *hm = (struct http_message *)ev_data;
 
-	end_poll_loop = false;
-	worker_thread = std::thread(NET_HTTP_PollLoop);
+		// wait for free event, set event, wait for result, free event
+		std::unique_lock<std::mutex> lk(srv.event.mutex);
+		srv.event.processed = false;
+
+		mgstr2str(srv.event.reqPath, sizeof(srv.event.reqPath), &hm->uri);
+		memmove(srv.event.reqPath, srv.event.reqPath + 1, strlen(srv.event.reqPath));
+
+		srv.event.cv_processed.wait(lk, [] { return srv.event.processed; });
+
+		if (srv.event.allowed) {
+			struct mg_serve_http_opts opts = {
+				srv.event.rootPath
+			};
+
+			mg_serve_http(nc, hm, opts);
+		} else {
+			mg_printf(nc, "HTTP/1.1 403 Forbidden\r\nContent-Type: text/html\r\n\r\n"
+				"<html><body><h1>403 Forbidden</h1></body></html>");
+			nc->flags |= MG_F_SEND_AND_CLOSE;
+		}
+	}
 }
 
-/*
-====================
-NET_HTTP_StopPolling
-====================
-*/
-static void NET_HTTP_StopPolling() {
-	if (!worker_thread.joinable())
-		return;
+static void NET_HTTP_ServerPollLoop() {
+	for (;;) {
+		mg_mgr_poll(&srv.mgr, POLL_MSEC);
 
-	end_poll_loop = true;
-	worker_thread.join();
-}
-
-/*
-====================
-NET_HTTP_Init
-====================
-*/
-void NET_HTTP_Init() {
-	mg_mgr_init(&http_mgr, NULL);
-	Com_DPrintf("HTTP Engine initialized\n");
-}
-
-/*
-====================
-NET_HTTP_Shutdown
-====================
-*/
-void NET_HTTP_Shutdown() {
-	NET_HTTP_StopServer();
-
-	Com_DPrintf("HTTP Engine: shutting down...\n");
-	mg_mgr_free(&http_mgr);
+		if (srv.end_poll_loop.load()) {
+			return;
+		}
+	}
 }
 
 /*
@@ -332,27 +106,31 @@ NET_HTTP_StartServer
 ====================
 */
 int NET_HTTP_StartServer(int port) {
-	NET_HTTP_StopPolling();
-
-	if (http_srv) {
-		NET_HTTP_StartPolling();
+	if (srv.running)
 		return 0;
-	}
+
+	mg_mgr_init(&srv.mgr, NULL);
 
 	if (port) {
-		http_srv = mg_bind(&http_mgr, va("%i", port), NET_HTTP_Event);
+		srv.con = mg_bind(&srv.mgr, va("%i", port), NET_HTTP_ServerEvent);
 	} else {
 		for (port = HTTPSRV_STDPORT; port <= HTTPSRV_STDPORT + 15; port++) {
-			http_srv = mg_bind(&http_mgr, va("%i", port), NET_HTTP_Event);
-			if (http_srv) break;
+			srv.con = mg_bind(&srv.mgr, va("%i", port), NET_HTTP_ServerEvent);
+			if (srv.con) break;
 		}
 	}
 
-	if (http_srv) {
-		mg_set_protocol_http_websocket(http_srv);
-		NET_HTTP_StartPolling();
+	if (srv.con) {
+		mg_set_protocol_http_websocket(srv.con);
+		
+		// reset event
+		srv.event.processed = true;
+
+		// start polling thread
+		srv.thread = std::thread(NET_HTTP_ServerPollLoop);
 
 		Com_Printf("HTTP Downloads: webserver running on port %i...\n", port);
+		srv.running = true;
 		return port;
 	} else {
 		Com_Error(ERR_DROP, "HTTP Downloads: webserver startup failed.");
@@ -366,44 +144,207 @@ NET_HTTP_StopServer
 ====================
 */
 void NET_HTTP_StopServer() {
-	NET_HTTP_StopPolling();
-
-	if (!http_srv) {
+	if (!srv.running)
 		return;
-	}
 
 	Com_Printf("HTTP Downloads: shutting down webserver...\n");
 
-	mg_mgr_free(&http_mgr);
-	http_srv = NULL;
+	srv.end_poll_loop = true;
+	srv.thread.join();
+	srv.end_poll_loop = false;
+
+	mg_mgr_free(&srv.mgr);
+	srv.running = false;
 }
 
 #ifndef DEDICATED
+/*
+========================================================
+Clientside Downloads
+========================================================
+*/
+#define MAX_PARALLEL_DOWNLOADS 8
+
+static std::mutex m_dls;
+static struct clientDL_t {
+	struct mg_mgr mgr;
+	struct mg_connection *con;
+
+	bool inuse;
+	bool downloading;
+
+	std::thread thread;
+	std::atomic_bool end_poll_loop;
+
+	FILE *file;
+	size_t total_bytes, downloaded_bytes;
+	dl_ended_callback ended_callback;
+	dl_status_callback status_callback;
+
+	bool error;
+	char err_msg[256];
+} cldls[MAX_PARALLEL_DOWNLOADS];
+
+static void NET_HTTP_DownloadProcessEvent() {
+	std::lock_guard<std::mutex> lk(m_dls);
+
+	for (int i = 0; i < ARRAY_LEN(cldls); i++) {
+		clientDL_t *cldl = &cldls[i];
+
+		if (cldl->inuse) {
+			if (cldl->downloading) {
+				if (cldl->total_bytes > 0 && cldl->status_callback) {
+					cldl->status_callback(cldl->total_bytes, cldl->downloaded_bytes);
+				}
+			} else {
+				// download ended
+
+				NET_HTTP_StopDownload((dlHandle_t)i);
+				cldl->ended_callback((dlHandle_t)i, (qboolean)(!cldl->error), cldl->err_msg);
+			}
+		}
+	}
+}
+
+static void NET_HTTP_DownloadRecvData(struct mbuf *io, struct mg_connection *nc, std::unique_lock<std::mutex> *lock) {
+	clientDL_t *cldl = (clientDL_t *)nc->user_data;
+
+	size_t bytesAvailable = io->len;
+	if (cldl->downloaded_bytes + bytesAvailable > cldl->total_bytes) {
+		bytesAvailable = cldl->total_bytes - cldl->downloaded_bytes;
+	}
+
+	if (bytesAvailable > 0) {
+		size_t wrote = 0;
+		size_t total = 0;
+		FILE *f = cldl->file;
+
+		// Handle short writes
+		// Unlock mutex while writing to disk
+		lock->unlock();
+		while ((wrote = fwrite(io->buf + total, 1, bytesAvailable - total, f)) > 0) {
+			total += wrote;
+		}
+		lock->lock();
+
+		if (total < bytesAvailable) {
+			strcpy(cldl->err_msg, "HTTP Error: 0 bytes written to file\n");
+			cldl->error = true;
+			nc->flags |= MG_F_CLOSE_IMMEDIATELY;
+			return;
+		}
+
+		cldl->downloaded_bytes += bytesAvailable;
+		mbuf_remove(io, bytesAvailable);
+	}
+
+	if (cldl->downloaded_bytes == cldl->total_bytes) {
+		nc->flags |= MG_F_CLOSE_IMMEDIATELY;
+	}
+}
+
+static void NET_HTTP_DownloadEvent(struct mg_connection *nc, int ev, void *ev_data) {
+	std::unique_lock<std::mutex> lk(m_dls);
+	clientDL_t *cldl = (clientDL_t *)nc->user_data;
+
+	switch (ev) {
+	case MG_EV_CONNECT: {
+		if (*(int *)ev_data != 0) {
+			sprintf(cldl->err_msg, "connecting failed: %s", strerror(*(int *)ev_data));
+			cldl->error = true;
+			nc->flags |= MG_F_CLOSE_IMMEDIATELY;
+			return;
+		}
+		break;
+	} case MG_EV_RECV: {
+		struct mbuf *io = &nc->recv_mbuf;
+
+		struct http_message msg;
+		if (!cldl->total_bytes && mg_parse_http(io->buf, (int)io->len, &msg, 0)) {
+			if (msg.resp_code != 200) {
+				char tmp[128];
+
+				mgstr2str(tmp, sizeof(tmp), &msg.resp_status_msg);
+				sprintf(cldl->err_msg, "HTTP Error: %i %s", msg.resp_code, tmp);
+				cldl->error = true;
+				nc->flags |= MG_F_CLOSE_IMMEDIATELY;
+				return;
+			}
+
+			if (msg.body.len && io->buf + io->len >= msg.body.p) {
+				cldl->total_bytes = msg.body.len;
+
+				mbuf_remove(io, msg.body.p - io->buf);
+				NET_HTTP_DownloadRecvData(io, nc, &lk);
+			}
+		} else {
+			NET_HTTP_DownloadRecvData(io, nc, &lk);
+		}
+		break;
+	} case MG_EV_CLOSE: {
+		cldl->downloading = false;
+		break;
+	} default:
+		break;
+	}
+}
+
+static void NET_HTTP_DownloadPollLoop(clientDL_t *cldl) {
+	for (;;) {
+		mg_mgr_poll(&cldl->mgr, POLL_MSEC);
+
+		if (cldl->end_poll_loop.load()) {
+			return;
+		}
+	}
+}
+
 /*
 ====================
 NET_HTTP_StartDownload
 ====================
 */
-void NET_HTTP_StartDownload(const char *url, const char *toPath, const char *userAgent, const char *referer) {
-	if (dl_file) {
-		return;
+dlHandle_t NET_HTTP_StartDownload(const char *url, const char *toPath, dl_ended_callback ended_callback, dl_status_callback status_callback, const char *userAgent, const char *referer) {
+	std::lock_guard<std::mutex> lk(m_dls);
+
+	// search for free dl slot
+	clientDL_t *cldl = NULL;
+	for (int i = 0; i < ARRAY_LEN(cldls); i++) {
+		cldl = &cldls[i];
+
+		if (!cldl->inuse) {
+			cldl = &cldls[i];
+			break;
+		}
 	}
 
-	dl_bytesWritten = dl_fileSize = 0;
-	dl_abortFlag = false; internal_error = false;
-	memset(&dlstatus, 0, sizeof(dlstatus));
+	if (!cldl) {
+		return -1;
+	}
 
-	dl_file = fopen(toPath, "wb");
-	if (!dl_file) {
+	cldl->file = fopen(toPath, "wb");
+	if (!cldl->file) {
 		Com_Error(ERR_DROP, "could not open file %s for writing.", toPath);
-		return;
+		return -1;
 	}
 
-	char headers[1024];
-	Com_sprintf(headers, sizeof(headers), "User-Agent: %s\r\nReferer: %s\r\n", userAgent, referer);
+	cldl->inuse = true;
+	cldl->downloading = true;
+	cldl->error = false;
+	cldl->downloaded_bytes = cldl->total_bytes = 0;
+	cldl->ended_callback = ended_callback;
+	cldl->status_callback = status_callback;
 
-	http_dl = mg_connect_http(&http_mgr, NET_HTTP_Event, url, headers, NULL);
-	NET_HTTP_StartPolling();
+	mg_mgr_init(&cldl->mgr, NULL);
+
+	char headers[512];
+	Com_sprintf(headers, sizeof(headers), "User-Agent: %s\r\nReferer: %s\r\n", userAgent, referer);
+	cldl->con = mg_connect_http_opt(&cldl->mgr, NET_HTTP_DownloadEvent, {(void *)cldl}, url, headers, NULL);
+
+	cldl->end_poll_loop = false;
+	cldl->thread = std::thread(NET_HTTP_DownloadPollLoop, cldl);
+
+	return cldl - cldls;
 }
 
 /*
@@ -411,27 +352,57 @@ void NET_HTTP_StartDownload(const char *url, const char *toPath, const char *use
 NET_HTTP_StopDownload
 ====================
 */
-void NET_HTTP_StopDownload() {
-	if (!dl_file) {
+void NET_HTTP_StopDownload(dlHandle_t handle) {
+	assert(handle >= 0);
+	assert(handle < ARRAY_LEN(cldls));
+
+	clientDL_t *cldl = &cldls[handle];
+	if (!cldl->inuse) {
 		return;
 	}
 
-	dl_abortFlag = true;
-	NET_HTTP_StopPolling();
-	http_dl = NULL;
-	event.inuse = false;
+	cldl->inuse = false;
+	
+	cldl->end_poll_loop = true;
+	if (cldl->thread.joinable())
+		cldl->thread.join();
 
-	fclose(dl_file); dl_file = NULL;
-	CL_EndHTTPDownload((qboolean)!(dl_fileSize && dl_bytesWritten == dl_fileSize));
+	cldl->downloading = false;
+
+	fclose(cldl->file);
+	cldl->file = NULL;
 }
+
 #endif
+/*
+========================================================
+========================================================
+*/
 
-static size_t mgstr2str(char *out, size_t outlen, const struct mg_str *in) {
-	size_t cpylen = in->len;
-	if (cpylen > outlen - 1) cpylen = outlen - 1;
+/*
+====================
+NET_HTTP_ProcessEvents
+====================
+*/
+void NET_HTTP_ProcessEvents() {
+	NET_HTTP_ServerProcessEvent();
 
-	memcpy(out, in->p, cpylen);
-	out[cpylen] = '\0';
+#ifndef DEDICATED
+	NET_HTTP_DownloadProcessEvent();
+#endif
+}
 
-	return cpylen;
+/*
+====================
+NET_HTTP_Shutdown
+====================
+*/
+void NET_HTTP_Shutdown() {
+	NET_HTTP_StopServer();
+
+#ifndef DEDICATED
+	for (int i = 0; i < ARRAY_LEN(cldls); i++) {
+		NET_HTTP_StopDownload((dlHandle_t)i);
+	}
+#endif
 }

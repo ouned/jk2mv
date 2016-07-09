@@ -822,8 +822,6 @@ void NET_OpenIP( void )
 		}
 		if ( ip_socket == INVALID_SOCKET )
 			Com_Printf( "WARNING: Couldn't bind to a v4 ip address.\n");
-
-		NET_HTTP_Init();
 	}
 }
 

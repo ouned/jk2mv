@@ -2732,7 +2732,7 @@ void Com_Frame( void ) {
 	com_frameMsec = msec;
 	msec = Com_ModifyMsec( msec );
 
-	NET_HTTP_ProgressEvents();
+	NET_HTTP_ProcessEvents();
 
 	//
 	// server side
