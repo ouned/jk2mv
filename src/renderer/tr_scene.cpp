@@ -396,8 +396,8 @@ void RE_RenderScene( const refdef_t *fd ) {
 	tr.refdef.y = fd->y;
 	tr.refdef.width = fd->width;
 	tr.refdef.height = fd->height;
-	tr.refdef.fov_x = fd->fov_x;
-	tr.refdef.fov_y = fd->fov_y;
+	tr.refdef.fov_x = fd->fov_x  * (1.0f + ((4.0f / 3.0f) - (glConfig.vidWidth / glConfig.vidHeight)));
+	tr.refdef.fov_y = fd->fov_y  * (1.0f + ((4.0f / 3.0f) - (glConfig.vidWidth / glConfig.vidHeight)));
 
 	VectorCopy( fd->vieworg, tr.refdef.vieworg );
 	VectorCopy( fd->viewaxis[0], tr.refdef.viewaxis[0] );
