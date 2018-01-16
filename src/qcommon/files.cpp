@@ -216,6 +216,8 @@ typedef struct {
 	fileInPack_t*	*hashTable;					// hash table
 	fileInPack_t*	buildBuffer;				// buffer with the filenames etc.
 	int				gvc;						// game-version compatibility
+	qboolean		isassets;					// is an assets pk3 (assets{0,1,2,3,5}.pk3)
+	qboolean		isassetsmv;					// is assetsmv[2].pk3
 } pack_t;
 
 typedef struct {
@@ -271,9 +273,9 @@ typedef struct {
 static fileHandleData_t	fsh[MAX_FILE_HANDLES];
 
 // never load anything from pk3 files that are not present at the server when pure
-static int			fs_numServerPaks;
-static int			fs_serverPaks[MAX_SEARCH_PATHS];				// checksums
-static const char	*fs_serverPakNames[MAX_SEARCH_PATHS];			// pk3 names
+static int			fs_numServerPurePaks;
+static int			fs_serverPurePaks[MAX_SEARCH_PATHS];				// checksums
+static const char	*fs_serverPakPureNames[MAX_SEARCH_PATHS];			// pk3 names
 
 // only used for autodownload, to make sure the client has at least
 // all the pk3 files that are referenced at the server side
@@ -284,8 +286,6 @@ static const char	*fs_serverReferencedPakNames[MAX_SEARCH_PATHS];		// pk3 names
 // last valid game folder used
 char lastValidBase[MAX_OSPATH];
 char lastValidGame[MAX_OSPATH];
-
-qboolean FS_idPak(pack_t *pack);
 
 /*
 ==============
@@ -305,18 +305,14 @@ FS_PakIsPure
 qboolean FS_PakIsPure( pack_t *pack ) {
 	int i;
 
-	// actually, I created a bypass for sv_pure here but since jk2 is opensource I really don't see a point in supporting pure
-	if (!Q_stricmp(pack->pakBasename, "assets2") || !Q_stricmp(pack->pakBasename, "assets5") || !Q_stricmp(pack->pakBasename, "assetsmv") || !Q_stricmp(pack->pakBasename, "assetsmv2"))
-		return qtrue;
-
-	if ( fs_numServerPaks ) {
+	if ( fs_numServerPurePaks ) {
     // NOTE TTimo we are matching checksums without checking the pak names
     //   this means you can have the same pk3 as the server under a different name, you will still get through sv_pure validation
     //   (what happens when two pk3's have the same checkums? is it a likely situation?)
 	//   also, if there's a wrong checksumed pk3 and autodownload is enabled, the checksum will be appended to the downloaded pk3 name
-		for ( i = 0 ; i < fs_numServerPaks ; i++ ) {
+		for ( i = 0 ; i < fs_numServerPurePaks ; i++ ) {
 			// FIXME: also use hashed file names
-			if ( pack->checksum == fs_serverPaks[i] ) {
+			if ( pack->checksum == fs_serverPurePaks[i] ) {
 				return qtrue;		// on the aproved list
 			}
 		}
@@ -1286,10 +1282,10 @@ int FS_FOpenFileReadHash(const char *filename, fileHandle_t *file, qboolean uniq
 		return -1;
 	}
 
-	isLocalConfig = ( !strcmp( filename, "autoexec.cfg" ) ||
-		!strcmp( filename, "jk2mvconfig.cfg" ) ||
-		!strcmp( filename, "jk2mvserver.cfg" ) ||
-		!strcmp( filename, "jk2mvglobal.cfg" ) );
+	isLocalConfig = ( !Q_stricmp( filename, "autoexec.cfg" ) ||
+		!Q_stricmp( filename, "jk2mvconfig.cfg" ) ||
+		!Q_stricmp( filename, "jk2mvserver.cfg" ) ||
+		!Q_stricmp( filename, "jk2mvglobal.cfg" ) );
 
 	//
 	// search through the path, one element at a time
@@ -1324,16 +1320,16 @@ int FS_FOpenFileReadHash(const char *filename, fileHandle_t *file, qboolean uniq
 				  (MV_GetCurrentGameversion() == VERSION_UNDEF))) {
 
 				// prevent loading unsupported qvm's
-				if (!Q_stricmp(filename, "vm/cgame.qvm") || !Q_stricmp(filename, "vm/ui.qvm") || !Q_stricmp(filename, "vm/jk2mpgame.qvm"))
+				if (!Q_stricmpn(filename, "vm/", 3))
 					continue;
 
 				// incompatible pk3
-				if (search->pack->gvc != PACKGVC_UNKNOWN && !FS_idPak(search->pack))
+				if (search->pack->gvc != PACKGVC_UNKNOWN)
 					continue;
 			}
 
-			// patchfiles are only allowed from within assetsmv.pk3
-			if (!Q_stricmp(get_filename_ext(filename), "menu_patch") && Q_stricmp(search->pack->pakBasename, "assetsmv")) {
+			// patchfiles are only allowed from within assets
+			if (!Q_stricmp(get_filename_ext(filename), "menu_patch") && !search->pack->isassetsmv) {
 				continue;
 			}
 
@@ -1353,25 +1349,39 @@ int FS_FOpenFileReadHash(const char *filename, fileHandle_t *file, qboolean uniq
 				if ( !FS_FilenameCompare( pakFile->name, filename ) ) {
 					// found it!
 
-					// reference lists
-					if ( !pak->noref ) {
-						// JK2MV automatically references pk3's in three cases:
-						// 1. A .bsp file is loaded from it (and thus it is expected to be a map)
-						// 2. cgame.qvm or ui.qvm is loaded from it (expected to be a clientside)
-						// 3. pk3 is located in fs_game != base (standard jk2 behavior)
-						// All others need to be referenced manually by the use of reflists.
-						
-						if (!Q_stricmp(get_filename_ext(filename), "bsp")) {
-							pak->referenced |= FS_GENERAL_REF;
-						}
+					// JK2MV automatically references pk3's for download in four cases:
+					// 1. A .bsp file is loaded from it (and thus it is expected to be a map)
+					// 2. cgame.qvm or ui.qvm is loaded from it (expected to be a clientside)
+					// 3. pk3 is located in fs_game != base (standard jk2 behavior)
+					// 4. server is pure. In this case the server will offer everything to the client that is needed to join (with exceptions shown below, standard jk2 behavior)
+					// All others need to be referenced manually by the use of reflists.
+					const char *ext = get_filename_ext(filename);
+					if (Q_stricmp(ext, "shader") != 0 &&
+						Q_stricmp(ext, "txt") != 0 &&
+						Q_stricmp(ext, "cfg") != 0 &&
+						Q_stricmp(ext, "fcf") != 0 &&
+						Q_stricmp(ext, "config") != 0 &&
+						strstr(filename, "levelshots") == NULL &&
+						Q_stricmp(ext, "bot") != 0 &&
+						Q_stricmp(ext, "arena") != 0 &&
+						Q_stricmp(ext, "menu") != 0) {
 
-						if (!Q_stricmp(filename, "vm/cgame.qvm")) {
-							pak->referenced |= FS_CGAME_REF;
-						}
+						pak->referenced |= FS_GENERAL_REF;
 
-						if (!Q_stricmp(filename, "vm/ui.qvm")) {
-							pak->referenced |= FS_UI_REF;
+						// make sure the client is able to download these files if it is a pure server
+						if (com_sv_running->integer && Cvar_VariableIntegerValue("sv_pure")) {
+							pak->referenced |= FS_DOWNLOAD_REF;
 						}
+					}
+
+					if (!Q_stricmp(filename, "vm/cgame.qvm")) {
+						pak->referenced |= FS_CGAME_REF | FS_DOWNLOAD_REF;
+					}
+					else if (!Q_stricmp(filename, "vm/ui.qvm")) {
+						pak->referenced |= FS_UI_REF | FS_DOWNLOAD_REF;
+					}
+					else if (!Q_stricmp(ext, "bsp")) {
+						pak->referenced |= FS_GENERAL_REF | FS_DOWNLOAD_REF;
 					}
 
 					if (uniqueFILE)
@@ -1424,17 +1434,10 @@ int FS_FOpenFileReadHash(const char *filename, fileHandle_t *file, qboolean uniq
 			} while(pakFile != NULL);
 		} else if ( search->dir ) {
 			// check a file in the directory tree
-
 			// if we are running restricted, the only files we
 			// will allow to come from the directory are .cfg files
 			l = (int)strlen( filename );
-	  // FIXME TTimo I'm not sure about the fs_numServerPaks test
-      // if you are using FS_ReadFile to find out if a file exists,
-      //   this test can make the search fail although the file is in the directory
-      // I had the problem on https://zerowing.idsoftware.com/bugzilla/show_bug.cgi?id=8
-      // turned out I used FS_FileExists instead
-			if ( fs_numServerPaks ) {
-
+			if ( fs_numServerPurePaks ) {
 				if ( Q_stricmp( filename + l - 4, ".cfg" )		// for config files
 					&& Q_stricmp( filename + l - 4, ".fcf" )	// force configuration files
 					&& Q_stricmp( filename + l - 5, ".menu" )	// menu files
@@ -1720,13 +1723,6 @@ int	FS_FileIsInPAK(const char *filename, int *pChecksum ) {
 		if ( search->pack && search->pack->hashTable[hash] ) {
 			// disregard if it doesn't match one of the allowed pure pak files
 			if ( !FS_PakIsPure(search->pack) ) {
-				continue;
-			}
-
-			// if scanning for cgame, ui or jk2mpgame and we are in 1.02 mode ignore assets5.pk3 and assets2.pk3
-			if (MV_GetCurrentGameversion() == VERSION_1_02 &&
-				(!Q_stricmp(filename, "vm/cgame.qvm") || !Q_stricmp(filename, "vm/ui.qvm") || !Q_stricmp(filename, "vm/jk2mpgame.qvm")) &&
-				(!Q_stricmp(search->pack->pakBasename, "assets2") || !Q_stricmp(search->pack->pakBasename, "assets5"))) {
 				continue;
 			}
 
@@ -2051,57 +2047,6 @@ static pack_t *FS_LoadZipFile( char *zipfile, const char *basename )
 
 	pack->buildBuffer = buildBuffer;
 
-	// which versions does this pk3 support?
-
-	// filename prefixes
-	if (!Q_stricmpn(basename, "o102_", 5)) {
-		pack->gvc = PACKGVC_1_02;
-	} else if (!Q_stricmpn(basename, "o103_", 5)) {
-		pack->gvc = PACKGVC_1_03;
-	} else if (!Q_stricmpn(basename, "o104_", 5)) {
-		pack->gvc = PACKGVC_1_04;
-	}
-
-	// mv.info file in root directory of pk3 file
-	char cversion[128];
-	int cversionlen = FS_PakReadFile(pack, "mv.info", cversion, sizeof(cversion) - 1);
-	if (cversionlen) {
-		cversion[cversionlen] = '\0';
-		pack->gvc = PACKGVC_UNKNOWN; // mv.info file overwrites version prefixes
-
-		if (Q_stristr(cversion, "compatible 1.02")) {
-			pack->gvc |= PACKGVC_1_02;
-		}
-
-		if (Q_stristr(cversion, "compatible 1.03")) {
-			pack->gvc |= PACKGVC_1_03;
-		}
-
-		if (Q_stristr(cversion, "compatible 1.04")) {
-			pack->gvc |= PACKGVC_1_04;
-		}
-
-		if (Q_stristr(cversion, "compatible all")) {
-			pack->gvc = PACKGVC_1_02 | PACKGVC_1_03 | PACKGVC_1_04;
-		}
-	}
-
-	// assets are hardcoded
-	if (!Q_stricmp(pack->pakBasename, "assets0")) {
-		pack->gvc = PACKGVC_1_02 | PACKGVC_1_03 | PACKGVC_1_04;
-	} else if (!Q_stricmp(pack->pakBasename, "assets1")) {
-		pack->gvc = PACKGVC_1_02 | PACKGVC_1_03 | PACKGVC_1_04;
-	} else if (!Q_stricmp(pack->pakBasename, "assets2")) {
-		pack->gvc = PACKGVC_1_03 | PACKGVC_1_04;
-	} else if (!Q_stricmp(pack->pakBasename, "assets5")) {
-		pack->gvc = PACKGVC_1_04;
-	}
-
-	// never reference assetsmv files
-	if (!Q_stricmpn(pack->pakBasename, "assetsmv", 8)) {
-		pack->noref = qtrue;
-	}
-
 	return pack;
 }
 
@@ -2218,13 +2163,13 @@ static const char **FS_ListFilteredFiles( const char *path, const char *extensio
 			// downloaded files are always okey because they are only loaded on servers currently using them
 			if (Q_stricmpn(search->pack->pakBasename, "dl_", 3) &&
 				!((search->pack->gvc & PACKGVC_1_02 && MV_GetCurrentGameversion() == VERSION_1_02) ||
-				 (search->pack->gvc & PACKGVC_1_03 && MV_GetCurrentGameversion() == VERSION_1_03) ||
-				 (search->pack->gvc & PACKGVC_1_04 && MV_GetCurrentGameversion() == VERSION_1_04) ||
-				 (Q_stricmp(search->pack->pakGamename, BASEGAME) && search->pack->gvc == PACKGVC_UNKNOWN) ||
-				 (MV_GetCurrentGameversion() == VERSION_UNDEF))) {
+				  (search->pack->gvc & PACKGVC_1_03 && MV_GetCurrentGameversion() == VERSION_1_03) ||
+				  (search->pack->gvc & PACKGVC_1_04 && MV_GetCurrentGameversion() == VERSION_1_04) ||
+				  (Q_stricmp(search->pack->pakGamename, BASEGAME) && search->pack->gvc == PACKGVC_UNKNOWN) ||
+				  (MV_GetCurrentGameversion() == VERSION_UNDEF))) {
 
 				// incompatible pk3
-				if (search->pack->gvc != PACKGVC_UNKNOWN && !FS_idPak(search->pack))
+				if (search->pack->gvc != PACKGVC_UNKNOWN)
 					continue;
 			}
 
@@ -2278,7 +2223,7 @@ static const char **FS_ListFilteredFiles( const char *path, const char *extensio
 			const char	*name;
 
 			// don't scan directories for files if we are pure or restricted
-			if ( (fs_numServerPaks) &&
+			if ( (fs_numServerPurePaks) &&
 				 (!extension || Q_stricmp(extension, "fcf")) )
 			{
 				//rww - allow scanning for fcf files outside of pak even if pure
@@ -2743,19 +2688,13 @@ void FS_Path_f( void ) {
 	Com_Printf ("Current search path:\n");
 	for (s = fs_searchpaths; s; s = s->next) {
 		if (s->pack) {
-			Com_Printf ("%s (%i files) [ %s%s%s%s]\n", s->pack->pakFilename, s->pack->numfiles,
+			Com_Printf ("%s (%i files) [ %s%s%s%s]%s\n", s->pack->pakFilename, s->pack->numfiles,
 				s->pack->gvc == PACKGVC_UNKNOWN ? "unknown " : "",
 				s->pack->gvc & PACKGVC_1_02 ? "1.02 " : "",
 				s->pack->gvc & PACKGVC_1_03 ? "1.03 " : "",
-				s->pack->gvc & PACKGVC_1_04 ? "1.04 " : "");
-
-			if ( fs_numServerPaks ) {
-				if ( !FS_PakIsPure(s->pack) ) {
-					Com_Printf( "	not on the pure list\n" );
-				} else {
-					Com_Printf( "	on the pure list\n" );
-				}
-			}
+				s->pack->gvc & PACKGVC_1_04 ? "1.04 " : "",
+				(fs_numServerPurePaks && FS_PakIsPure(s->pack)) ? " [Pure]" : ""
+			);
 		} else {
 			Com_Printf ("%s/%s\n", s->dir->path, s->dir->gamedir );
 		}
@@ -2977,6 +2916,70 @@ static void FS_AddGameDirectory( const char *path, const char *dir, qboolean ass
 		if ( ( pak = FS_LoadZipFile( pakfile, sorted[i] ) ) == 0 )
 			continue;
 
+		// store the game name for downloading
+		Q_strncpyz(pak->pakGamename, dir, sizeof(pak->pakGamename));
+
+		// which versions does this pk3 support?
+
+		// filename prefixes
+		if (!Q_stricmpn(pak->pakBasename, "o102_", 5)) {
+			pak->gvc = PACKGVC_1_02;
+		}
+		else if (!Q_stricmpn(pak->pakBasename, "o103_", 5)) {
+			pak->gvc = PACKGVC_1_03;
+		}
+		else if (!Q_stricmpn(pak->pakBasename, "o104_", 5)) {
+			pak->gvc = PACKGVC_1_04;
+		}
+
+		// mv.info file in root directory of pk3 file
+		char cversion[128];
+		int cversionlen = FS_PakReadFile(pak, "mv.info", cversion, sizeof(cversion) - 1);
+		if (cversionlen) {
+			cversion[cversionlen] = '\0';
+			pak->gvc = PACKGVC_UNKNOWN; // mv.info file overwrites version prefixes
+
+			if (Q_stristr(cversion, "compatible 1.02")) {
+				pak->gvc |= PACKGVC_1_02;
+			}
+
+			if (Q_stristr(cversion, "compatible 1.03")) {
+				pak->gvc |= PACKGVC_1_03;
+			}
+
+			if (Q_stristr(cversion, "compatible 1.04")) {
+				pak->gvc |= PACKGVC_1_04;
+			}
+
+			if (Q_stristr(cversion, "compatible all")) {
+				pak->gvc = PACKGVC_1_02 | PACKGVC_1_03 | PACKGVC_1_04;
+			}
+		}
+
+		// assets are hardcoded
+		if (!Q_stricmp(pak->pakGamename, BASEGAME)) {
+			if (!Q_stricmp(pak->pakBasename, "assets0")) {
+				pak->gvc = PACKGVC_1_02 | PACKGVC_1_03 | PACKGVC_1_04;
+				pak->isassets = qtrue;
+			}
+			else if (!Q_stricmp(pak->pakBasename, "assets1")) {
+				pak->gvc = PACKGVC_1_02 | PACKGVC_1_03 | PACKGVC_1_04;
+				pak->isassets = qtrue;
+			}
+			else if (!Q_stricmp(pak->pakBasename, "assets2")) {
+				pak->gvc = PACKGVC_1_03 | PACKGVC_1_04;
+				pak->isassets = qtrue;
+			}
+			else if (!Q_stricmp(pak->pakBasename, "assets5")) {
+				pak->gvc = PACKGVC_1_04;
+				pak->isassets = qtrue;
+			}
+
+			else if (!Q_stricmpn(pak->pakBasename, "assetsmv", 8)) {
+				pak->isassetsmv = qtrue;
+			}
+		}
+
 #ifndef DEDICATED
 		// files beginning with "dl_" are only loaded when referenced by the server
 		if (!Q_stricmpn(filename, "dl_", 3)) {
@@ -3001,12 +3004,9 @@ static void FS_AddGameDirectory( const char *path, const char *dir, qboolean ass
 		}
 #endif
 
-		// store the game name for downloading
-		Q_strncpyz(pak->pakGamename, dir, sizeof(pak->pakGamename));
-
 		// if the pk3 is not in base, always reference it (standard jk2 behaviour)
 		if (Q_stricmpn(pak->pakGamename, BASEGAME, (int)strlen(BASEGAME))) {
-			pak->referenced |= FS_GENERAL_REF;
+			pak->referenced |= FS_GENERAL_REF | FS_DOWNLOAD_REF;
 		}
 
 		search = (searchpath_s *)Z_Malloc (sizeof(searchpath_t), TAG_FILESYS, qtrue);
@@ -3021,10 +3021,10 @@ static void FS_AddGameDirectory( const char *path, const char *dir, qboolean ass
 
 /*
 ================
-FS_idPak
+FS_IsAssets
 ================
 */
-qboolean FS_idPakPath(const char *pak, const char *base) {
+qboolean FS_IsAssets(const char *pak, const char *base) {
 	int i;
 	char path[MAX_OSPATH];
 
@@ -3039,24 +3039,7 @@ qboolean FS_idPakPath(const char *pak, const char *base) {
 		return qtrue;
 	}
 
-	Com_sprintf(path, sizeof(path), "%s/assetsmv", base);
-	if (!FS_FilenameCompare(pak, path)) {
-		return qtrue;
-	}
-
-	Com_sprintf(path, sizeof(path), "%s/assetsmv2", base);
-	if (!FS_FilenameCompare(pak, path)) {
-		return qtrue;
-	}
-
 	return qfalse;
-}
-
-qboolean FS_idPak(pack_t *pak) {
-	char path[MAX_OSPATH];
-	Com_sprintf(path, sizeof(path), "%s/%s", pak->pakGamename, pak->pakBasename);
-	
-	return FS_idPakPath(path, BASEGAME);
 }
 
 /*
@@ -3115,7 +3098,7 @@ qboolean FS_ComparePaks( char *neededpaks, int len, int *chksums, size_t maxchks
 		havepak = qfalse;
 
 		// never autodownload any of the id paks
-		if ( FS_idPakPath(fs_serverReferencedPakNames[i], BASEGAME) ) {
+		if ( FS_IsAssets(fs_serverReferencedPakNames[i], BASEGAME) ) {
 			continue;
 		}
 
@@ -3364,7 +3347,7 @@ static void FS_Startup( const char *gameName ) {
 				search->pack->noref = qtrue;
 				search->pack->referenced = 0;
 			} else if (f_f && Q_stristr(mv_forcelist, packstr)) {
-				search->pack->referenced |= FS_GENERAL_REF;
+				search->pack->referenced |= FS_GENERAL_REF | FS_DOWNLOAD_REF;
 			}
 		}
 	}
@@ -3406,12 +3389,6 @@ const char *FS_LoadedPakChecksums( void ) {
 			continue;
 		}
 
-		if (MV_GetCurrentGameversion() == VERSION_1_02 && (!Q_stricmp(search->pack->pakBasename, "assets2") || !Q_stricmp(search->pack->pakBasename, "assets5")))
-			continue;
-
-		if (MV_GetCurrentGameversion() == VERSION_1_03 && (!Q_stricmp(search->pack->pakBasename, "assets5")))
-			continue;
-
 		Q_strcat( info, sizeof( info ), va("%i ", search->pack->checksum ) );
 	}
 
@@ -3438,12 +3415,6 @@ const char *FS_LoadedPakNames( void ) {
 			continue;
 		}
 
-		if (MV_GetCurrentGameversion() == VERSION_1_02 && (!Q_stricmp(search->pack->pakBasename, "assets2") || !Q_stricmp(search->pack->pakBasename, "assets5")))
-			continue;
-
-		if (MV_GetCurrentGameversion() == VERSION_1_03 && (!Q_stricmp(search->pack->pakBasename, "assets5")))
-			continue;
-
 		if (*info) {
 			Q_strcat(info, sizeof( info ), " " );
 		}
@@ -3455,32 +3426,37 @@ const char *FS_LoadedPakNames( void ) {
 
 /*
 =====================
-FS_LoadedPakPureChecksums
+FS_ReferencedPakNames
 
-Returns a space separated string containing the pure checksums of all loaded pk3 files.
-Servers with sv_pure use these checksums to compare with the checksums the clients send
-back to the server.
+Returns a space separated string containing the names of all referenced pk3 files.
+The server will send this to the clients so they can check which files should be auto-downloaded.
 =====================
 */
-const char *FS_LoadedPakPureChecksums( void ) {
+const char *FS_ReferencedPakNames(void) {
 	static char	info[BIG_INFO_STRING];
 	searchpath_t	*search;
 
 	info[0] = 0;
 
-	for ( search = fs_searchpaths ; search ; search = search->next ) {
+	// we want to return ALL pk3's from the fs_game path
+	// and referenced one's from base
+	for (search = fs_searchpaths; search; search = search->next) {
 		// is the element a pak file?
-		if ( !search->pack ) {
-			continue;
+		if (search->pack) {
+			// never download one of the assets
+			if (search->pack->isassets)
+				continue;
+
+			if (search->pack->referenced & FS_DOWNLOAD_REF) {
+				if (*info) {
+					Q_strcat(info, sizeof(info), " ");
+				}
+
+				Q_strcat(info, sizeof(info), search->pack->pakGamename);
+				Q_strcat(info, sizeof(info), "/");
+				Q_strcat(info, sizeof(info), search->pack->pakBasename);
+			}
 		}
-
-		if (MV_GetCurrentGameversion() == VERSION_1_02 && (!Q_stricmp(search->pack->pakBasename, "assets2") || !Q_stricmp(search->pack->pakBasename, "assets5")))
-			continue;
-
-		if (MV_GetCurrentGameversion() == VERSION_1_03 && (!Q_stricmp(search->pack->pakBasename, "assets5")))
-			continue;
-
-		Q_strcat( info, sizeof( info ), va("%i ", search->pack->pure_checksum ) );
 	}
 
 	return info;
@@ -3504,13 +3480,11 @@ const char *FS_ReferencedPakChecksums( void ) {
 	for ( search = fs_searchpaths ; search ; search = search->next ) {
 		// is the element a pak file?
 		if ( search->pack ) {
-			if (MV_GetCurrentGameversion() == VERSION_1_02 && (!Q_stricmp(search->pack->pakBasename, "assets2") || !Q_stricmp(search->pack->pakBasename, "assets5")))
+			// never download one of the assets
+			if (search->pack->isassets)
 				continue;
 
-			if (MV_GetCurrentGameversion() == VERSION_1_03 && (!Q_stricmp(search->pack->pakBasename, "assets5")))
-				continue;
-
-			if (search->pack->referenced) {
+			if (search->pack->referenced & FS_DOWNLOAD_REF) {
 				Q_strcat(info, sizeof(info), va("%i ", search->pack->checksum));
 			}
 		}
@@ -3529,7 +3503,7 @@ Servers with sv_pure set will get this string back from clients for pure validat
 The string has a specific order, "cgame ui @ ref1 ref2 ref3 ..."
 =====================
 */
-const char *FS_ReferencedPakPureChecksums( void ) {
+const char *FS_ReferencedPakPureChecksums(qboolean names) {
 	static char	info[BIG_INFO_STRING];
 	searchpath_t	*search;
 	int nFlags, numPaks, checksum;
@@ -3550,13 +3524,12 @@ const char *FS_ReferencedPakPureChecksums( void ) {
 		for ( search = fs_searchpaths ; search ; search = search->next ) {
 			// is the element a pak file and has it been referenced based on flag?
 			if ( search->pack && (search->pack->referenced & nFlags)) {
-				if (MV_GetCurrentGameversion() == VERSION_1_02 && (!Q_stricmp(search->pack->pakBasename, "assets2") || !Q_stricmp(search->pack->pakBasename, "assets5")))
-					continue;
+				if (names) {
+					Q_strcat(info, sizeof(info), va("%s/%s[%i] ", search->pack->pakGamename, search->pack->pakBasename, search->pack->pure_checksum));
+				} else {
+					Q_strcat(info, sizeof(info), va("%i ", search->pack->pure_checksum));
+				}
 
-				if (MV_GetCurrentGameversion() == VERSION_1_03 && (!Q_stricmp(search->pack->pakBasename, "assets5")))
-					continue;
-
-				Q_strcat( info, sizeof( info ), va("%i ", search->pack->pure_checksum ) );
 				if (nFlags & (FS_CGAME_REF | FS_UI_REF)) {
 					break;
 				}
@@ -3578,39 +3551,26 @@ const char *FS_ReferencedPakPureChecksums( void ) {
 
 /*
 =====================
-FS_ReferencedPakNames
+FS_LoadedPakPureChecksums
 
-Returns a space separated string containing the names of all referenced pk3 files.
-The server will send this to the clients so they can check which files should be auto-downloaded.
+Returns a space separated string containing the pure checksums of all loaded pk3 files.
+Servers with sv_pure use these checksums to compare with the checksums the clients send
+back to the server.
 =====================
 */
-const char *FS_ReferencedPakNames( void ) {
+const char *FS_LoadedPakPureChecksums(void) {
 	static char	info[BIG_INFO_STRING];
 	searchpath_t	*search;
 
 	info[0] = 0;
 
-	// we want to return ALL pk3's from the fs_game path
-	// and referenced one's from base
-	for ( search = fs_searchpaths ; search ; search = search->next ) {
+	for (search = fs_searchpaths; search; search = search->next) {
 		// is the element a pak file?
-		if ( search->pack ) {
-			if (MV_GetCurrentGameversion() == VERSION_1_02 && (!Q_stricmp(search->pack->pakBasename, "assets2") || !Q_stricmp(search->pack->pakBasename, "assets5")))
-				continue;
-
-			if (MV_GetCurrentGameversion() == VERSION_1_03 && (!Q_stricmp(search->pack->pakBasename, "assets5")))
-				continue;
-
-			if (search->pack->referenced) {
-				if (*info) {
-					Q_strcat(info, sizeof( info ), " " );
-				}
-
-				Q_strcat(info, sizeof(info), search->pack->pakGamename);
-				Q_strcat(info, sizeof(info), "/");
-				Q_strcat(info, sizeof(info), search->pack->pakBasename);
-			}
+		if (!search->pack) {
+			continue;
 		}
+
+		Q_strcat(info, sizeof(info), va("%i ", search->pack->pure_checksum));
 	}
 
 	return info;
@@ -3656,21 +3616,21 @@ void FS_PureServerSetLoadedPaks( const char *pakSums, const char *pakNames ) {
 		c = MAX_SEARCH_PATHS;
 	}
 
-	fs_numServerPaks = c;
+	fs_numServerPurePaks = c;
 
 	for ( i = 0 ; i < c ; i++ ) {
-		fs_serverPaks[i] = atoi( Cmd_Argv( i ) );
+		fs_serverPurePaks[i] = atoi( Cmd_Argv( i ) );
 	}
 
-	if (fs_numServerPaks) {
+	if (fs_numServerPurePaks) {
 		Com_DPrintf( "Connected to a pure server.\n" );
 	}
 
 	for ( i = 0 ; i < c ; i++ ) {
-		if (fs_serverPakNames[i]) {
-			Z_Free((void *)fs_serverPakNames[i]);
+		if (fs_serverPakPureNames[i]) {
+			Z_Free((void *)fs_serverPakPureNames[i]);
 		}
-		fs_serverPakNames[i] = NULL;
+		fs_serverPakPureNames[i] = NULL;
 	}
 	if ( pakNames && *pakNames ) {
 		Cmd_TokenizeString( pakNames );
@@ -3681,21 +3641,21 @@ void FS_PureServerSetLoadedPaks( const char *pakSums, const char *pakNames ) {
 		}
 
 		for ( i = 0 ; i < d ; i++ ) {
-			fs_serverPakNames[i] = CopyString( Cmd_Argv( i ) );
+			fs_serverPakPureNames[i] = CopyString( Cmd_Argv( i ) );
 		}
 	}
 }
 
 /*
 =====================
-FS_PureServerSetReferencedPaks
+FS_ServerSetReferencedPaks
 
 The checksums and names of the pk3 files referenced at the server
 are sent to the client and stored here. The client will use these
 checksums to see if any pk3 files need to be auto-downloaded.
 =====================
 */
-void FS_PureServerSetReferencedPaks( const char *pakSums, const char *pakNames ) {
+void FS_ServerSetReferencedPaks( const char *pakSums, const char *pakNames ) {
 	int		i, c, d;
 
 	Cmd_TokenizeString( pakSums );
@@ -3939,7 +3899,7 @@ const char *FS_MV_VerifyDownloadPath(const char *pk3file) {
 		if (!search->pack)
 			continue;
 		
-		if (FS_idPak(search->pack))
+		if (search->pack->isassets)
 			continue;
 
 		char tmp[MAX_OSPATH];
@@ -3949,7 +3909,7 @@ const char *FS_MV_VerifyDownloadPath(const char *pk3file) {
 			if (search->pack->noref)
 				return NULL;
 
-			if (search->pack->referenced) {
+			if (search->pack->referenced & FS_DOWNLOAD_REF) {
 				static char gameDataPath[MAX_OSPATH];
 				Q_strncpyz(gameDataPath, search->pack->pakFilename, sizeof(gameDataPath));
 

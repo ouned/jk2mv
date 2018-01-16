@@ -594,7 +594,7 @@ Ghoul2 Insert End
 	srand(Com_Milliseconds());
 	sv.checksumFeed = ( ((int) rand() << 16) ^ rand() ) ^ Com_Milliseconds();
 
-	FS_PureServerSetReferencedPaks("", "");
+	FS_ServerSetReferencedPaks("", "");
 	FS_Restart( sv.checksumFeed );
 
 	CM_LoadMap( va("maps/%s.bsp", server), qfalse, &checksum );
@@ -686,11 +686,9 @@ Ghoul2 Insert End
 
 	svs.hibernation.disableUntil = svs.time + 10000;
 
-	// if a dedicated server we need to touch the cgame and ui because it could be in a
+	// we need to touch the cgame and ui because it could be in a
 	// seperate pk3 file and the client will need to load the latest cgame.qvm
-	if (com_dedicated->integer) {
-		SV_TouchCGame();
-	}
+	SV_TouchCGame();
 
 	if ( sv_pure->integer ) {
 		// the server sends these to the clients so they will only

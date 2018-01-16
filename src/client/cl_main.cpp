@@ -751,7 +751,7 @@ void CL_FlushMemory( qboolean disconnecting ) {
 	if (disconnecting && !com_sv_running->integer) {
 		MV_SetCurrentGameversion(VERSION_UNDEF);
 
-		FS_PureServerSetReferencedPaks("", "");
+		FS_ServerSetReferencedPaks("", "");
 		// change checksum feed so that next FS_ConditionalRestart()
 		// works when connecting back to the same server
 		clc.checksumFeed = 0;
@@ -1211,7 +1211,7 @@ void CL_SendPureChecksums( void ) {
 	int i;
 
 	// if we are pure we need to send back a command with our referenced pk3 checksums
-	pChecksums = FS_ReferencedPakPureChecksums();
+	pChecksums = FS_ReferencedPakPureChecksums(qfalse);
 
 	// "cp"
 	// "Yf"
@@ -1333,11 +1333,20 @@ void CL_OpenedPK3List_f( void ) {
 
 /*
 ==================
-CL_PureList_f
+CL_ReferencedPK3List_f
 ==================
 */
 void CL_ReferencedPK3List_f( void ) {
 	Com_Printf("Referenced PK3 Names: %s\n", FS_ReferencedPakNames());
+}
+
+/*
+==================
+CL_ReferencedPK3PureList_f
+==================
+*/
+void CL_ReferencedPK3PureList_f(void) {
+	Com_Printf("Referenced Pure PK3 Names: %s\n", FS_ReferencedPakPureChecksums(qtrue));
 }
 
 /*
@@ -2873,6 +2882,7 @@ void CL_Init( void ) {
 	Cmd_AddCommand ("showip", CL_ShowIP_f );
 	Cmd_AddCommand ("fs_openedList", CL_OpenedPK3List_f );
 	Cmd_AddCommand ("fs_referencedList", CL_ReferencedPK3List_f );
+	Cmd_AddCommand ("fs_referencedPureList", CL_ReferencedPK3PureList_f);
 	Cmd_AddCommand ("model", CL_SetModel_f );
 	Cmd_AddCommand ("forcepowers", CL_SetForcePowers_f );
 	Cmd_AddCommand ("saveDemo", demoAutoSave_f);

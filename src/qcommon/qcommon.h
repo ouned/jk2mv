@@ -581,6 +581,8 @@ issues.
 #define FS_GENERAL_REF	0x01
 #define FS_UI_REF		0x02
 #define FS_CGAME_REF	0x04
+#define FS_DOWNLOAD_REF 0x08
+
 // number of id paks that will never be autodownloaded from base
 #define NUM_ID_PAKS		9
 
@@ -691,7 +693,7 @@ const char *FS_LoadedPakPureChecksums( void );
 
 const char *FS_ReferencedPakNames( void );
 const char *FS_ReferencedPakChecksums( void );
-const char *FS_ReferencedPakPureChecksums( void );
+const char *FS_ReferencedPakPureChecksums(qboolean names);
 // Returns a space separated string containing the checksums of all loaded
 // AND referenced pk3 files. Servers with sv_pure set will get this string
 // back from clients for pure validation
@@ -699,7 +701,7 @@ const char *FS_ReferencedPakPureChecksums( void );
 void FS_ClearPakReferences( int flags );
 // clears referenced booleans on loaded pk3s
 
-void FS_PureServerSetReferencedPaks( const char *pakSums, const char *pakNames );
+void FS_ServerSetReferencedPaks( const char *pakSums, const char *pakNames );
 void FS_PureServerSetLoadedPaks( const char *pakSums, const char *pakNames );
 // If the string is empty, all data sources will be allowed.
 // If not empty, only pk3 files that match one of the space
