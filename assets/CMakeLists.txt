@@ -74,6 +74,8 @@ set(AssetsFiles
 	"vm/ui_102.map"
 	"vm/ui_103.map"
 	"vm/ui_104.map"
+
+	"mv.info"
 )
 
 source_group("assetsmv" FILES ${AssetsFiles})
