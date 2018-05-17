@@ -7,6 +7,7 @@ services:
 env:
   global:
     - secure: "mDL8liuT/BrF83h7kTEBTyZEw/oqnT+BrN2n/Cg1pO5YsFTUU50JH1OG6mCylUW0zK6wvpvEnJ6yb/cAzW9oVk05HbKLbsU98v70oYvDtcjc7NbOTkGVcSkFELTEqqjeNxxTYe9BB1u0mgShspQStD5iiqEr3d0FqwcxtQ2vqfG55u7nH6wUrYdt850P7AXgtESD4G81y/W+SwGTljqiCtPYUapyEgyQoWbTED5X2KDWLsMvBz4wuRFAcA8ivuBm6cvZK9dw0V/bazHWNdyo2NmTPtrP3uyQPCSCbbyUvca1gcs2ZKWgieILRK9d6RzxMf0TgMrAHvdcKyV5E3jtcTzzJilx/Lx9Cei0HMAyC5gb2dlhmqg4tjNwpacGeJYVz0Kb+WB7fW5Qmhe3N32CkydMd7mWr4d8+f6kecInFF848MU40YBA3UVRrkq/DzM7uCWM9M2LHIJqk+es8w65L1o+FowAzl1krUiJWASErZnofNN0WQ/ki3NNAZXGgnmxUeg3J6XLO8M22LvarRQypij4b1PH2HrwBDbiAqIj40RmhXpddnoQEj7YtkIESc99LDGxHnVpZ6gp8BICnpw+/v+MlgoMLjJiob69FWfgC7+QfZISoqsZ2YHFGKH35INYLrrGyQ1gXhlGdhgC8bX1tRkSJyPjbr9/JqeDht9ch6A="
+    - secure: "t/Y/D24dmSHzRlCqmrZDexRkqbsInPsZDOurDbPpJsPMXon9AEsoqsweijtVPO/cDtoRusW3rwhjI+eVsct3RF8ncuIavSYHqFl/QLj3HN+9H11R8lMtkYamzQcv60nYpMEyosAUufrcPyDwFbXt7lmSHPYWk6UWkmoos1kRdLGC25LqFxHNc6dGwPbfaEVQBv5wPZZzWRLH4jNA9uLhz2arZY8ZG7/9aB1DsxMpEnTS0zHyTkXq7yE9hop4KQKGXq9WVNHoKS6MOnMnZuMYL+RMdD0tH8V8tkqttRkQOQFRcz6MaKpCUb2+Buu+MJmV6QAd1N1vVVAsqoAcMuapTnZ4YRhhflV/cfzUanQDlnmdR4OUBPxeqXD3RxWz/huKAB4zX2oO+W/Rdv1VJf+5N80CpvmLgNQFIFZVOiqTGs2HoLV0pjGalav0gVR2cDqBNcgLmGzRW1GhWU0VYyCYAFqdTC0hml8G+53wUMtA9OEO4qb1wWfWIQxYDwCZR2nA9kwWUddNRKC+N+m3x935ERyFVIUXoIa+xLCtZpMloOpLwVuW5hHLlesHQXenwF2jiypoh3hJTkgQOVoNl65md7WcgCjdqekdratcoOBnL2r7oYW8yjLkaiJs/K8hFwx2OG/82HVqcNqkZ4Iyz/0EwS2FMKb3+TIOkS9Z4jqfWEg="
 
 notifications:
   irc:
@@ -68,8 +69,16 @@ before_deploy: |
   sed -i -e "s/@MV_DATE@/$(date -u +"%Y-%m-%d")/g" tools/bintray.json
 
 deploy:
-  provider: bintray
   skip_cleanup: true
-  file: "tools/bintray.json"
-  user: "ouned"
-  key: $BINTRAY_APIKEY
+  - provider: bintray
+    file: "tools/bintray.json"
+    user: "ouned"
+    key: $BINTRAY_APIKEY
+    on:
+      tags: false
+  - provider: releases
+    file_glob: true
+    file: build/travis/*.{deb,rpm,dmg}
+    api_key: $GITHUB_APIKEY
+    on:
+      tags: true
