@@ -69,16 +69,17 @@ before_deploy: |
   sed -i -e "s/@MV_DATE@/$(date -u +"%Y-%m-%d")/g" tools/bintray.json
 
 deploy:
-  skip_cleanup: true
   - provider: bintray
     file: "tools/bintray.json"
     user: "ouned"
     key: $BINTRAY_APIKEY
+    skip_cleanup: true
     on:
       tags: false
   - provider: releases
     file_glob: true
     file: build/travis/*.{deb,rpm,dmg}
     api_key: $GITHUB_APIKEY
+    skip_cleanup: true
     on:
       tags: true
