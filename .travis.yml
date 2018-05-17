@@ -6,9 +6,7 @@ services:
 
 env:
   global:
-    - "FTP_SERVER=ftp://jk2mv.org"
-    - "FTP_USER=defaultcideploy"
-    - secure: "Kr9l60txHt8qJsZ/GFRe3f+U3N222qIMFq9Y5kjtF0cZaDb5/+a4cAp58AhtADkWJU5kiB8SR6IFoQ2f71NIuj4/k4SJr6HI8S7gjzY+5HaWdl6/us52BqxlQCg82BJNKavhQ4dK7Yb9GBoXmc7LXmmcXHwGuQR6rsWJs1cR9J8="
+    - secure: "mDL8liuT/BrF83h7kTEBTyZEw/oqnT+BrN2n/Cg1pO5YsFTUU50JH1OG6mCylUW0zK6wvpvEnJ6yb/cAzW9oVk05HbKLbsU98v70oYvDtcjc7NbOTkGVcSkFELTEqqjeNxxTYe9BB1u0mgShspQStD5iiqEr3d0FqwcxtQ2vqfG55u7nH6wUrYdt850P7AXgtESD4G81y/W+SwGTljqiCtPYUapyEgyQoWbTED5X2KDWLsMvBz4wuRFAcA8ivuBm6cvZK9dw0V/bazHWNdyo2NmTPtrP3uyQPCSCbbyUvca1gcs2ZKWgieILRK9d6RzxMf0TgMrAHvdcKyV5E3jtcTzzJilx/Lx9Cei0HMAyC5gb2dlhmqg4tjNwpacGeJYVz0Kb+WB7fW5Qmhe3N32CkydMd7mWr4d8+f6kecInFF848MU40YBA3UVRrkq/DzM7uCWM9M2LHIJqk+es8w65L1o+FowAzl1krUiJWASErZnofNN0WQ/ki3NNAZXGgnmxUeg3J6XLO8M22LvarRQypij4b1PH2HrwBDbiAqIj40RmhXpddnoQEj7YtkIESc99LDGxHnVpZ6gp8BICnpw+/v+MlgoMLjJiob69FWfgC7+QfZISoqsZ2YHFGKH35INYLrrGyQ1gXhlGdhgC8bX1tRkSJyPjbr9/JqeDht9ch6A="
 
 notifications:
   irc:
@@ -16,8 +14,7 @@ notifications:
       - "irc.quakenet.org#jk2mv"
     template:
       - "%{repository} (%{commit}): %{commit_subject}"
-      - "(%{result}): %{message}"
-      - "Build details: %{build_url}"
+      - "%{message} Details: %{build_url}"
 
 matrix:
   include:
@@ -28,6 +25,7 @@ matrix:
 
 before_install: |
   git fetch --unshallow
+  
   if [[ "$HOST" == linux-x86_64-gcc ]]; then
       docker pull ubuntu:16.04
       docker run --name bc -v $TRAVIS_BUILD_DIR:/jk2mv -td ubuntu:16.04 /bin/bash
@@ -64,10 +62,14 @@ script: |
 after_script: |
   if [[ "$HOST" == linux-x86_64-gcc ]]; then docker stop bc; fi
 
-after_success: |
-  if [[ "${TRAVIS_PULL_REQUEST}" = "false" ]] && [[ "${TRAVIS_BRANCH}" = "master" ]]; then
-      cd $TRAVIS_BUILD_DIR/build/travis/out
-      for i in *.{deb,rpm,dmg}; do
-          curl -T ${i} -u $FTP_USER:$FTP_PASSWORD $FTP_SERVER
-      done
-  fi
+before_deploy: |
+  cd $TRAVIS_BUILD_DIR
+  MV_VERSION = "$(git describe --tags)"
+  sed -i -e "s/@MV_VERSION@/$(MV_VERSION)/g" tools/bintray.json
+  sed -i -e "s/@MV_DATE@/$(date -u +"%Y-%m-%d")/g" tools/bintray.json
+
+deploy:
+  provider: bintray
+  file: "tools/bintray.json"
+  user: "ouned"
+  key: $BINTRAY_APIKEY
