@@ -69,6 +69,7 @@ before_deploy: |
 
 deploy:
   provider: bintray
+  skip_cleanup: true
   file: "tools/bintray.json"
   user: "ouned"
   key: $BINTRAY_APIKEY
