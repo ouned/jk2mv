@@ -64,8 +64,7 @@ after_script: |
 
 before_deploy: |
   cd $TRAVIS_BUILD_DIR
-  MV_VERSION = "$(git describe --tags)"
-  sed -i -e "s/@MV_VERSION@/$(MV_VERSION)/g" tools/bintray.json
+  sed -i -e "s/@MV_VERSION@/$(git describe --tags)/g" tools/bintray.json
   sed -i -e "s/@MV_DATE@/$(date -u +"%Y-%m-%d")/g" tools/bintray.json
 
 deploy:
