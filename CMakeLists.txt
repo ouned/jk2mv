@@ -48,15 +48,6 @@ if(BuildMVSDK AND NOT EXISTS "${CMAKE_SOURCE_DIR}/src/mvsdk/CMakeLists.txt")
     set(BuildMVSDK OFF)
 endif()
 
-if(NOT APPLE AND NOT WIN32)
-	option(BuildPackDEB "Whether to create the DEB package" OFF)
-	option(BuildPackRPM "Whether to create the RPM package" OFF)
-	
-	if ((BuildPackDEB OR BuildPackRPM) AND BuildPortableVersion)
-		message(FATAL_ERROR "Packaging the portable version is not supported.")
-	endif()
-endif()
-
 option(LegacyHTTPDownloads "Activate this for legacy JK2MF http downloads. Bad code due to bad implementation in jk2mf" OFF)
 option(NTClientWorkaround "Disable loading of NT-Mod pk3 files to prevent crashing the game" ON)
 
@@ -369,50 +360,42 @@ else()
 
 		set(CPACK_GENERATOR "TGZ")
 	elseif()
-		# DEB
-		if(BuildPackDEB)
-			set(CPACK_GENERATOR ${CPACK_GENERATOR} "DEB")
-			set(CPACK_DEBIAN_PACKAGE_NAME "jk2mv") # debian packages are lowercase
-			set(CPACK_DEBIAN_PACKAGE_SECTION "games")
-			set(CPACK_DEBIAN_PACKAGE_HOMEPAGE ${ProjectURL})
-			set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE ${Architecture})
-			set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+		set(CPACK_GENERATOR ${CPACK_GENERATOR} "DEB")
+		set(CPACK_DEBIAN_PACKAGE_NAME "jk2mv") # debian packages are lowercase
+		set(CPACK_DEBIAN_PACKAGE_SECTION "games")
+		set(CPACK_DEBIAN_PACKAGE_HOMEPAGE ${ProjectURL})
+		set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE ${Architecture})
+		set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+
+		set(CPACK_GENERATOR ${CPACK_GENERATOR} "RPM")
+		set(CPACK_RPM_PACKAGE_NAME "jk2mv")
+		set(CPACK_RPM_PACKAGE_DESCRIPTION "JK2MV (Multi Version) is a modification for Jedi Knight II: Jedi Outcast. It supports all three game versions and comes with various features and optimizations.")
+		set(CPACK_RPM_PACKAGE_URL ${ProjectURL})
+		set(CPACK_RPM_PACKAGE_LICENSE "GPLv2")
+		set(CPACK_RPM_PACKAGE_GROUP "Amusements/Games")
+		set(CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION
+			/usr/share/applications
+			/usr/share/metainfo
+			/usr/share/icons /usr/share/icons/hicolor
+			/usr/share/icons/hicolor/256x256 /usr/share/icons/hicolor/256x256/apps
+			/usr/share/icons/hicolor/48x48 /usr/share/icons/hicolor/48x48/apps
+		)
+
+		set(CPACK_RPM_PACKAGE_REQUIRES "glibc, libgcc, libstdc++, SDL2, openal-soft")
+		if(NOT UseInternalZLIB)
+			set(CPACK_RPM_PACKAGE_REQUIRES "${CPACK_RPM_PACKAGE_REQUIRES}, zlib")
+		endif()
+		if(NOT UseInternalMiniZip)
+			set(CPACK_RPM_PACKAGE_REQUIRES "${CPACK_RPM_PACKAGE_REQUIRES}, minizip")
+		endif()
+		if(NOT UseInternalJPEG)
+			set(CPACK_RPM_PACKAGE_REQUIRES "${CPACK_RPM_PACKAGE_REQUIRES}, libjpeg-turbo")
+		endif()
+		if(NOT UseInternalPNG)
+			set(CPACK_RPM_PACKAGE_REQUIRES "${CPACK_RPM_PACKAGE_REQUIRES}, libpng")
 		endif()
 
-		# RPM
-		if(BuildPackRPM)
-			set(CPACK_GENERATOR ${CPACK_GENERATOR} "RPM")
-			set(CPACK_RPM_PACKAGE_NAME "jk2mv")
-			set(CPACK_RPM_PACKAGE_DESCRIPTION "JK2MV (Multi Version) is a modification for Jedi Knight II: Jedi Outcast. It supports all three game versions and comes with various features and optimizations.")
-			set(CPACK_RPM_PACKAGE_URL ${ProjectURL})
-			set(CPACK_RPM_PACKAGE_LICENSE "GPLv2")
-			set(CPACK_RPM_PACKAGE_GROUP "Amusements/Games")
-			set(CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION
-				/usr/share/applications
-				/usr/share/metainfo
-				/usr/share/icons /usr/share/icons/hicolor
-				/usr/share/icons/hicolor/256x256 /usr/share/icons/hicolor/256x256/apps
-				/usr/share/icons/hicolor/48x48 /usr/share/icons/hicolor/48x48/apps
-			)
-
-			set(CPACK_RPM_PACKAGE_REQUIRES "glibc, libgcc, libstdc++, SDL2, openal-soft")
-			if(NOT UseInternalZLIB)
-				set(CPACK_RPM_PACKAGE_REQUIRES "${CPACK_RPM_PACKAGE_REQUIRES}, zlib")
-			endif()
-			if(NOT UseInternalMiniZip)
-				set(CPACK_RPM_PACKAGE_REQUIRES "${CPACK_RPM_PACKAGE_REQUIRES}, minizip")
-			endif()
-			if(NOT UseInternalJPEG)
-				set(CPACK_RPM_PACKAGE_REQUIRES "${CPACK_RPM_PACKAGE_REQUIRES}, libjpeg-turbo")
-			endif()
-			if(NOT UseInternalPNG)
-				set(CPACK_RPM_PACKAGE_REQUIRES "${CPACK_RPM_PACKAGE_REQUIRES}, libpng")
-			endif()
-		endif()
-
-		if(BuildPackDEB OR BuildPackRPM)
-			include(CPack)
-		endif()
+		include(CPack)
 	endif()
 endif()
 
