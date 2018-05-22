@@ -355,7 +355,7 @@ else()
 		set(CPACK_PACKAGE_FILE_NAME "${CPACK_PACKAGE_FILE_NAME}-portable")
 
 		set(CPACK_GENERATOR "TGZ")
-	elseif()
+	else()
 		set(CPACK_GENERATOR ${CPACK_GENERATOR} "DEB")
 		set(CPACK_DEBIAN_PACKAGE_NAME "jk2mv") # debian packages are lowercase
 		set(CPACK_DEBIAN_PACKAGE_SECTION "games")
