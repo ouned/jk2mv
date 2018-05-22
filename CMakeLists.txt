@@ -337,8 +337,6 @@ if(WIN32)
 		)
 		string(REGEX REPLACE "/" "\\\\\\\\" CPACK_NSIS_INCLFILE "${CMAKE_BINARY_DIR}/res/NSIS.definitions.nsh")
 	endif()
-	
-	include(CPack)
 elseif(APPLE)
 	set(CPACK_PACKAGE_FILE_NAME "${CPACK_PACKAGE_FILE_NAME}-macosx-${Architecture}")
 
@@ -350,8 +348,6 @@ elseif(APPLE)
 		set(CPACK_GENERATOR "DragNDrop")
 		set(CPACK_DMG_FORMAT "UDBZ")
 	endif()
-
-	include(CPack)
 else()
 	set(CPACK_PACKAGE_FILE_NAME "${CPACK_PACKAGE_FILE_NAME}-linux-${Architecture}")
 
@@ -394,10 +390,9 @@ else()
 		if(NOT UseInternalPNG)
 			set(CPACK_RPM_PACKAGE_REQUIRES "${CPACK_RPM_PACKAGE_REQUIRES}, libpng")
 		endif()
-
-		include(CPack)
 	endif()
 endif()
+include(CPack)
 
 add_subdirectory(assets)
 add_subdirectory(src)
