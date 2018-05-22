@@ -41,13 +41,22 @@ build_script:
       Get-ChildItem "*.zip" | % { Push-AppveyorArtifact $_.Name }
 
 deploy:
-- provider: BinTray
-  username: ouned
-  api_key:
-    secure: qpzkDGuG2cXmXNsOuBfZxaR2Bsj9AAYHx533UfRQWPSvYMsGxiTd8Kx2851Ey957
-  subject: mvdevs
-  repo: jk2mv
-  package: jk2mv-dev
-  publish: true
-  override: true
-  explode: false
+  - provider: BinTray
+    username: ouned
+    api_key:
+      secure: qpzkDGuG2cXmXNsOuBfZxaR2Bsj9AAYHx533UfRQWPSvYMsGxiTd8Kx2851Ey957
+    subject: mvdevs
+    repo: jk2mv
+    package: jk2mv-dev
+    publish: true
+    override: true
+    explode: false
+    on:
+      appveyor_repo_tag: false
+
+  - provider: GitHub
+    description: ''
+    auth_token:
+      secure: QZNpf5euIq4+cVLazVgYHe1EpbW3en/IOaNHmr9QNHa+TDJW5GWcjp/XDa/gnU42
+    on:
+      appveyor_repo_tag: true
